@@ -1,0 +1,268 @@
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+:root {
+  --bg: #0f1117;
+  --surface: #1a1d27;
+  --border: #2a2d3a;
+  --text: #e2e4ef;
+  --text-muted: #7c7f96;
+  --accent: #6c8eff;
+  --accent-hover: #8aa3ff;
+  --success: #3ecf6e;
+  --warning: #f5a623;
+  --error: #f56565;
+  --info: #63b3ed;
+  --radius: 10px;
+  --font-mono: "Maple Mono NF CN", "JetBrains Mono", monospace;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: "Noto Sans CJK SC", system-ui, sans-serif;
+  font-size: 14px;
+  line-height: 1.6;
+  min-height: 100vh;
+}
+
+.app {
+  max-width: 680px;
+  margin: 0 auto;
+  padding: 24px 16px 48px;
+}
+
+.header {
+  text-align: center;
+  margin-bottom: 28px;
+}
+
+.header h1 {
+  font-size: 26px;
+  font-weight: 700;
+  color: var(--text);
+  margin-bottom: 6px;
+}
+
+.header p {
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.main {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 20px;
+}
+
+.card h2 {
+  font-size: 15px;
+  font-weight: 600;
+  margin-bottom: 14px;
+  color: var(--text);
+}
+
+.hint {
+  color: var(--text-muted);
+  font-size: 12px;
+  margin-bottom: 12px;
+}
+
+.info-row {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.info-row:last-child {
+  border-bottom: none;
+}
+
+.label {
+  color: var(--text-muted);
+  font-size: 12px;
+  min-width: 96px;
+  flex-shrink: 0;
+}
+
+.value {
+  color: var(--text);
+}
+
+.info-row a {
+  color: var(--accent);
+  text-decoration: none;
+  font-size: 12px;
+  word-break: break-all;
+}
+
+.info-row a:hover {
+  color: var(--accent-hover);
+  text-decoration: underline;
+}
+
+code {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  background: rgba(108, 142, 255, 0.1);
+  color: var(--accent);
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+.rime-info {
+  display: flex;
+  flex-direction: column;
+}
+
+.commands {
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.block-code {
+  display: block;
+  padding: 6px 10px;
+  border-radius: 6px;
+}
+
+.alert {
+  padding: 10px 14px;
+  border-radius: 8px;
+  font-size: 13px;
+  margin-bottom: 12px;
+}
+
+.alert:last-child {
+  margin-bottom: 0;
+}
+
+.alert-success {
+  background: rgba(62, 207, 110, 0.1);
+  border: 1px solid rgba(62, 207, 110, 0.3);
+  color: var(--success);
+}
+
+.alert-warning {
+  background: rgba(245, 166, 35, 0.1);
+  border: 1px solid rgba(245, 166, 35, 0.3);
+  color: var(--warning);
+}
+
+.alert-error {
+  background: rgba(245, 101, 101, 0.1);
+  border: 1px solid rgba(245, 101, 101, 0.3);
+  color: var(--error);
+}
+
+.alert-info {
+  background: rgba(99, 179, 237, 0.1);
+  border: 1px solid rgba(99, 179, 237, 0.3);
+  color: var(--info);
+}
+
+.dir-section {
+  margin-top: 4px;
+}
+
+.button-row {
+  display: flex;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.btn {
+  padding: 9px 18px;
+  border: none;
+  border-radius: 7px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s, opacity 0.15s;
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btn-primary {
+  background: var(--accent);
+  color: #fff;
+}
+
+.btn-primary:not(:disabled):hover {
+  background: var(--accent-hover);
+}
+
+.btn-install {
+  background: var(--success);
+  color: #fff;
+}
+
+.btn-install:not(:disabled):hover {
+  background: #4ddf80;
+}
+
+.selected-dir {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: rgba(62, 207, 110, 0.08);
+  border: 1px solid rgba(62, 207, 110, 0.2);
+  border-radius: 7px;
+  margin-bottom: 12px;
+}
+
+.check {
+  color: var(--success);
+  font-size: 14px;
+  flex-shrink: 0;
+}
+
+.selected-dir code {
+  background: none;
+  color: var(--text);
+  padding: 0;
+  word-break: break-all;
+}
+
+.progress-wrap {
+  margin-bottom: 12px;
+}
+
+.progress-bar {
+  height: 6px;
+  background: var(--border);
+  border-radius: 3px;
+  overflow: hidden;
+  margin-bottom: 6px;
+}
+
+.progress-fill {
+  height: 100%;
+  background: var(--accent);
+  border-radius: 3px;
+  transition: width 0.2s ease;
+}
+
+.progress-msg {
+  font-size: 12px;
+  color: var(--text-muted);
+}

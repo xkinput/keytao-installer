@@ -1,7 +1,7 @@
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct DownloadUrls {
@@ -26,6 +26,17 @@ pub struct InstallProgress {
     pub message: String,
 }
 
+#[derive(Serialize, Clone)]
+pub struct FileItem {
+    pub name: String,
+    pub is_dir: bool,
+}
+
+#[derive(Serialize, Clone)]
+pub struct InstallResult {
+    pub merged_schemas: Vec<String>,
+}
+
 fn build_client() -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
         .user_agent("keytao-installer/0.1.0")
@@ -37,11 +48,23 @@ fn build_client() -> Result<reqwest::Client, String> {
 async fn fetch_latest_release() -> Result<ReleaseInfo, String> {
     let client = build_client()?;
 
-    let release: serde_json::Value = client
+    let response = client
         .get("https://api.github.com/repos/xkinput/KeyTao/releases/latest")
         .send()
         .await
-        .map_err(|e| format!("网络请求失败: {e}"))?
+        .map_err(|e| format!("网络请求失败: {e}"))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body: serde_json::Value = response.json().await.unwrap_or_default();
+        let msg = body["message"].as_str().unwrap_or("");
+        if msg.contains("rate limit") {
+            return Err("GitHub API 请求频率超限，请稍后再试".to_string());
+        }
+        return Err(format!("获取版本信息失败，HTTP {status}: {msg}"));
+    }
+
+    let release: serde_json::Value = response
         .json()
         .await
         .map_err(|e| format!("解析响应失败: {e}"))?;
@@ -71,7 +94,7 @@ async fn fetch_latest_release() -> Result<ReleaseInfo, String> {
                 urls.macos = Some(url);
             } else if asset_name.contains("win") || asset_name.contains("windows") {
                 urls.windows = Some(url);
-            } else if asset_name.contains("android") {
+            } else if asset_name.contains("android") || asset_name.contains("trime") {
                 urls.android = Some(url);
             } else if asset_name.contains("linux") {
                 urls.linux = Some(url);
@@ -79,87 +102,153 @@ async fn fetch_latest_release() -> Result<ReleaseInfo, String> {
         }
     }
 
-    Ok(ReleaseInfo {
-        version,
-        name,
-        published_at,
-        download_urls: urls,
-    })
+    Ok(ReleaseInfo { version, name, published_at, download_urls: urls })
 }
 
-fn rime_default_path() -> Option<std::path::PathBuf> {
+fn rime_default_path() -> Option<PathBuf> {
     #[cfg(target_os = "macos")]
-    {
-        // Squirrel: ~/Library/Rime
-        dirs::home_dir().map(|h| h.join("Library/Rime"))
-    }
+    { dirs::home_dir().map(|h| h.join("Library/Rime")) }
     #[cfg(target_os = "windows")]
-    {
-        // Weasel: %APPDATA%\Rime
-        dirs::config_dir().map(|c| c.join("Rime"))
-    }
+    { dirs::config_dir().map(|c| c.join("Rime")) }
     #[cfg(target_os = "linux")]
     {
-        // Prefer whichever exists: fcitx5 > ibus, fall back to fcitx5 path
         let home = dirs::home_dir()?;
         let fcitx5 = home.join(".local/share/fcitx5/rime");
         let ibus = home.join(".config/ibus/rime");
-        if fcitx5.exists() {
-            Some(fcitx5)
-        } else if ibus.exists() {
-            Some(ibus)
-        } else {
-            // Neither exists yet; default to fcitx5 (more common on modern distros)
-            Some(fcitx5)
+        if fcitx5.exists() { Some(fcitx5) } else if ibus.exists() { Some(ibus) } else { Some(fcitx5) }
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+    { None }
+}
+
+#[tauri::command]
+async fn select_directory(#[allow(unused_variables)] app: AppHandle) -> Result<Option<String>, String> {
+    #[cfg(not(target_os = "android"))]
+    {
+        use tauri_plugin_dialog::{DialogExt, FilePath};
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let mut builder = app.dialog().file();
+        if let Some(default) = rime_default_path() {
+            builder = builder.set_directory(default);
         }
+        builder.pick_folder(move |folder: Option<FilePath>| {
+            let _ = tx.send(folder);
+        });
+        let result = rx.await.map_err(|e| e.to_string())?;
+        Ok(result.map(|p| p.to_string()))
     }
     #[cfg(target_os = "android")]
     {
-        Some(std::path::PathBuf::from("/sdcard/rime"))
-    }
-    #[cfg(not(any(
-        target_os = "macos",
-        target_os = "windows",
-        target_os = "linux",
-        target_os = "android"
-    )))]
-    {
-        None
+        Err("Not supported on Android".into())
     }
 }
 
 #[tauri::command]
-async fn select_directory(app: AppHandle) -> Result<Option<String>, String> {
-    use tauri_plugin_dialog::DialogExt;
-    let (tx, rx) = tokio::sync::oneshot::channel();
-
-    let mut builder = app.dialog().file();
-    if let Some(default) = rime_default_path() {
-        builder = builder.set_directory(default);
-    }
-    builder.pick_folder(move |folder| {
-        let _ = tx.send(folder);
+fn list_dir(path: String) -> Result<Vec<FileItem>, String> {
+    let entries = std::fs::read_dir(&path).map_err(|e| format!("读取目录失败: {e}"))?;
+    let mut items: Vec<FileItem> = entries
+        .filter_map(|e| e.ok())
+        .map(|e| FileItem {
+            name: e.file_name().to_string_lossy().into_owned(),
+            is_dir: e.file_type().map(|t| t.is_dir()).unwrap_or(false),
+        })
+        .collect();
+    items.sort_by(|a, b| match (a.is_dir, b.is_dir) {
+        (true, false) => std::cmp::Ordering::Less,
+        (false, true) => std::cmp::Ordering::Greater,
+        _ => a.name.cmp(&b.name),
     });
-
-    let result = rx.await.map_err(|e| e.to_string())?;
-    Ok(result.map(|p| p.to_string()))
+    Ok(items)
 }
 
 #[tauri::command]
-async fn download_and_install(
-    app: AppHandle,
-    url: String,
-    dest_path: String,
-) -> Result<(), String> {
+fn read_local_schemas(path: String) -> Vec<String> {
+    let base = std::path::Path::new(&path);
+    let content = std::fs::read_to_string(base.join("default.custom.yaml"))
+        .or_else(|_| std::fs::read_to_string(base.join("default-custom.yaml")))
+        .unwrap_or_default();
+    parse_schema_list(&content)
+}
+
+fn is_keytao_file(relative: &str) -> bool {
+    let top = relative.split('/').next().unwrap_or("");
+    if top == "opencc" || top == "lua" {
+        return true;
+    }
+    let filename = relative.rsplit('/').next().unwrap_or(relative);
+    filename.starts_with("keytao")
+}
+
+fn is_default_custom(filename: &str) -> bool {
+    filename == "default.custom.yaml" || filename == "default-custom.yaml"
+}
+
+fn parse_schema_list(content: &str) -> Vec<String> {
+    let mut schemas = Vec::new();
+    let mut in_list = false;
+    for line in content.lines() {
+        let t = line.trim();
+        if t.contains("schema_list:") {
+            in_list = true;
+            continue;
+        }
+        if in_list {
+            if let Some(rest) = t.strip_prefix("- schema:") {
+                let s = rest.trim().to_string();
+                if !s.is_empty() {
+                    schemas.push(s);
+                }
+            } else if !t.is_empty() && !t.starts_with('#') && !t.starts_with('-') {
+                in_list = false;
+            }
+        }
+    }
+    schemas
+}
+
+fn merge_default_custom(existing: Option<&str>, zip_content: &str) -> (String, Vec<String>) {
+    let keytao: Vec<String> = parse_schema_list(zip_content)
+        .into_iter()
+        .filter(|s| s.starts_with("keytao"))
+        .collect();
+    let user: Vec<String> = existing
+        .map(|c| parse_schema_list(c).into_iter().filter(|s| !s.starts_with("keytao")).collect())
+        .unwrap_or_default();
+    let all: Vec<String> = user.iter().chain(keytao.iter()).cloned().collect();
+
+    let mut out = String::new();
+    let mut in_list = false;
+    for line in zip_content.lines() {
+        let t = line.trim();
+        if !in_list {
+            out.push_str(line);
+            out.push('\n');
+            if t.contains("schema_list:") {
+                in_list = true;
+                for s in &all {
+                    out.push_str(&format!("    - schema: {s}\n"));
+                }
+            }
+        } else if t.starts_with("- schema:") {
+            // skip original entries
+        } else {
+            in_list = false;
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+
+    (out, user)
+}
+
+#[tauri::command]
+async fn download_to_temp(app: AppHandle, url: String) -> Result<String, String> {
     let emit = |stage: &str, percent: u32, message: &str| {
-        let _ = app.emit(
-            "install-progress",
-            InstallProgress {
-                stage: stage.to_string(),
-                percent,
-                message: message.to_string(),
-            },
-        );
+        let _ = app.emit("install-progress", InstallProgress {
+            stage: stage.to_string(),
+            percent,
+            message: message.to_string(),
+        });
     };
 
     emit("downloading", 0, "正在下载...");
@@ -188,9 +277,8 @@ async fn download_and_install(
         let chunk = chunk.map_err(|e| format!("下载中断: {e}"))?;
         downloaded += chunk.len() as u64;
         bytes.extend_from_slice(&chunk);
-
         if total_size > 0 {
-            let percent = (downloaded * 50 / total_size) as u32;
+            let percent = (downloaded * 60 / total_size) as u32;
             emit(
                 "downloading",
                 percent,
@@ -203,46 +291,288 @@ async fn download_and_install(
         }
     }
 
-    emit("extracting", 50, "正在解压...");
+    let cache_dir = app.path().app_cache_dir().map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&cache_dir).map_err(|e| e.to_string())?;
+    let temp_path = cache_dir.join("keytao_download.zip");
+    std::fs::write(&temp_path, &bytes).map_err(|e| format!("保存临时文件失败: {e}"))?;
 
-    let cursor = std::io::Cursor::new(bytes);
-    let mut archive = zip::ZipArchive::new(cursor).map_err(|e| format!("解压失败: {e}"))?;
-    let total_files = archive.len();
+    emit("downloading", 60, "下载完成，准备解压...");
+    Ok(temp_path.to_string_lossy().into_owned())
+}
+
+#[tauri::command]
+async fn smart_install<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    zip_path: String,
+    dest_path: String,
+) -> Result<InstallResult, String> {
+    let emit = |stage: &str, percent: u32, message: &str| {
+        let _ = app.emit("install-progress", InstallProgress {
+            stage: stage.to_string(),
+            percent,
+            message: message.to_string(),
+        });
+    };
+
+    emit("extracting", 61, "正在解压...");
+
+    let zip_bytes = std::fs::read(&zip_path).map_err(|e| e.to_string())?;
     let dest = PathBuf::from(&dest_path);
 
-    for i in 0..total_files {
-        let mut file = archive.by_index(i).map_err(|e| format!("读取压缩包失败: {e}"))?;
-        let raw = file.name().to_string();
+    // First pass: find default.custom.yaml in zip
+    let (merged_path, merged_content, merged_schemas) = {
+        let cursor = std::io::Cursor::new(&zip_bytes);
+        let mut archive = zip::ZipArchive::new(cursor).map_err(|e| format!("解压失败: {e}"))?;
 
-        // Strip the top-level folder prefix (e.g. "keytao-mac/foo" → "foo")
-        let relative = raw.splitn(2, '/').nth(1).unwrap_or("").trim_end_matches('/');
-        if relative.is_empty() {
-            continue;
-        }
+        let mut zip_dc_path: Option<String> = None;
+        let mut zip_dc_content: Option<String> = None;
 
-        let out_path = dest.join(relative);
-
-        if file.is_dir() {
-            std::fs::create_dir_all(&out_path)
-                .map_err(|e| format!("创建目录失败 {relative}: {e}"))?;
-        } else {
-            if let Some(parent) = out_path.parent() {
-                std::fs::create_dir_all(parent)
-                    .map_err(|e| format!("创建父目录失败: {e}"))?;
+        for i in 0..archive.len() {
+            let mut file = archive.by_index(i).map_err(|e| e.to_string())?;
+            let raw = file.name().to_string();
+            let relative = raw.splitn(2, '/').nth(1).unwrap_or("").trim_end_matches('/');
+            let filename = relative.rsplit('/').next().unwrap_or(relative);
+            if !file.is_dir() && is_default_custom(filename) {
+                use std::io::Read;
+                let mut buf = String::new();
+                file.read_to_string(&mut buf).map_err(|e| e.to_string())?;
+                zip_dc_path = Some(relative.to_string());
+                zip_dc_content = Some(buf);
+                break;
             }
-            let mut out_file = std::fs::File::create(&out_path)
-                .map_err(|e| format!("创建文件失败 {relative}: {e}"))?;
-            std::io::copy(&mut file, &mut out_file)
-                .map_err(|e| format!("写入文件失败 {relative}: {e}"))?;
         }
 
-        let percent = 50 + ((i + 1) * 50 / total_files) as u32;
-        emit("extracting", percent, &format!("正在解压... {}/{}", i + 1, total_files));
+        if let (Some(path), Some(content)) = (zip_dc_path, zip_dc_content) {
+            let existing = std::fs::read_to_string(dest.join("default.custom.yaml"))
+                .ok()
+                .or_else(|| std::fs::read_to_string(dest.join("default-custom.yaml")).ok());
+            let (merged, user) = merge_default_custom(existing.as_deref(), &content);
+            (Some(path), Some(merged), user)
+        } else {
+            (None, None, Vec::new())
+        }
+    };
+
+    // Second pass: smart extraction
+    let cursor = std::io::Cursor::new(&zip_bytes);
+    let mut archive = zip::ZipArchive::new(cursor).map_err(|e| format!("解压失败: {e}"))?;
+    let total = archive.len();
+
+    for i in 0..total {
+        let (relative, is_dir, content) = {
+            let mut file = archive.by_index(i).map_err(|e| e.to_string())?;
+            let raw = file.name().to_string();
+            let relative = raw.splitn(2, '/').nth(1).unwrap_or("").trim_end_matches('/').to_string();
+            if relative.is_empty() {
+                continue;
+            }
+            let is_dir = file.is_dir();
+            let mut buf = Vec::new();
+            if !is_dir {
+                use std::io::Read;
+                file.read_to_end(&mut buf).map_err(|e| e.to_string())?;
+            }
+            (relative, is_dir, buf)
+        };
+
+        if is_dir {
+            if is_keytao_file(&relative) {
+                std::fs::create_dir_all(dest.join(&relative)).ok();
+            }
+        } else if Some(&relative) == merged_path.as_ref() {
+            // Write merged default.custom.yaml
+            if let Some(ref mc) = merged_content {
+                let out = dest.join(&relative);
+                if let Some(p) = out.parent() {
+                    std::fs::create_dir_all(p).ok();
+                }
+                std::fs::write(&out, mc.as_bytes())
+                    .map_err(|e| format!("写入失败 {relative}: {e}"))?;
+            }
+        } else if is_keytao_file(&relative) {
+            let out = dest.join(&relative);
+            if let Some(p) = out.parent() {
+                std::fs::create_dir_all(p).map_err(|e| format!("创建目录失败: {e}"))?;
+            }
+            std::fs::write(&out, &content).map_err(|e| format!("写入失败 {relative}: {e}"))?;
+        }
+        // else: skip
+
+        let percent = 61 + ((i + 1) * 39 / total) as u32;
+        emit("extracting", percent, &format!("正在安装... {}/{}", i + 1, total));
     }
 
+    std::fs::remove_file(&zip_path).ok();
     emit("done", 100, "安装完成！");
-    Ok(())
+
+    Ok(InstallResult { merged_schemas })
 }
+
+// ─── Android plugin ──────────────────────────────────────────────────────────
+
+#[cfg(target_os = "android")]
+struct ScopedStorageHandle<R: tauri::Runtime>(tauri::plugin::PluginHandle<R>);
+
+fn scoped_storage_plugin<R: tauri::Runtime>() -> tauri::plugin::TauriPlugin<R> {
+    tauri::plugin::Builder::new("scopedStorage")
+        .setup(|app, api| {
+            #[cfg(target_os = "android")]
+            {
+                let handle = api.register_android_plugin(
+                    "com.rea.keytao_installer",
+                    "ScopedStoragePlugin",
+                )?;
+                app.manage(ScopedStorageHandle(handle));
+            }
+            Ok(())
+        })
+        .build()
+}
+
+#[tauri::command]
+async fn android_open_app<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    package_name: String,
+) -> Result<(), String> {
+    #[cfg(target_os = "android")]
+    {
+        app.state::<ScopedStorageHandle<R>>()
+            .0
+            .run_mobile_plugin("openApp", serde_json::json!({ "packageName": package_name }))
+            .map(|_: serde_json::Value| ())
+            .map_err(|e| e.to_string())
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        Err("Not Android".into())
+    }
+}
+
+#[tauri::command]
+async fn android_pick_directory<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+) -> Result<serde_json::Value, String> {
+    #[cfg(target_os = "android")]
+    {
+        app.state::<ScopedStorageHandle<R>>()
+            .0
+            .run_mobile_plugin("pickDirectory", ())
+            .map_err(|e| e.to_string())
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        Err("Not Android".into())
+    }
+}
+
+#[tauri::command]
+async fn android_list_files<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    tree_uri: String,
+) -> Result<Vec<FileItem>, String> {
+    #[cfg(target_os = "android")]
+    {
+        let result: serde_json::Value = app
+            .state::<ScopedStorageHandle<R>>()
+            .0
+            .run_mobile_plugin("listFiles", serde_json::json!({ "treeUri": tree_uri }))
+            .map_err(|e| e.to_string())?;
+
+        let files = result["files"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .map(|v| FileItem {
+                        name: v["name"].as_str().unwrap_or("").to_string(),
+                        is_dir: v["isDir"].as_bool().unwrap_or(false),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        Ok(files)
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        Err("Not Android".into())
+    }
+}
+
+#[tauri::command]
+async fn android_read_local_schemas<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    tree_uri: String,
+) -> Result<Vec<String>, String> {
+    #[cfg(target_os = "android")]
+    {
+        let result: serde_json::Value = app
+            .state::<ScopedStorageHandle<R>>()
+            .0
+            .run_mobile_plugin("readLocalSchemas", serde_json::json!({ "treeUri": tree_uri }))
+            .map_err(|e| e.to_string())?;
+
+        let schemas = result["schemas"]
+            .as_array()
+            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .unwrap_or_default();
+
+        Ok(schemas)
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        Err("Not Android".into())
+    }
+}
+
+#[tauri::command]
+async fn android_smart_extract<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    zip_path: String,
+    tree_uri: String,
+) -> Result<InstallResult, String> {
+    #[cfg(target_os = "android")]
+    {
+        let _ = app.emit(
+            "install-progress",
+            InstallProgress {
+                stage: "extracting".into(),
+                percent: 61,
+                message: "正在解压...".into(),
+            },
+        );
+
+        let result: serde_json::Value = app
+            .state::<ScopedStorageHandle<R>>()
+            .0
+            .run_mobile_plugin(
+                "smartExtractZip",
+                serde_json::json!({ "zipPath": zip_path, "treeUri": tree_uri }),
+            )
+            .map_err(|e| e.to_string())?;
+
+        let _ = app.emit(
+            "install-progress",
+            InstallProgress {
+                stage: "done".into(),
+                percent: 100,
+                message: "安装完成！".into(),
+            },
+        );
+
+        let merged_schemas = result["mergedSchemas"]
+            .as_array()
+            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .unwrap_or_default();
+
+        Ok(InstallResult { merged_schemas })
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        Err("Not Android".into())
+    }
+}
+
+// ─── Entry point ─────────────────────────────────────────────────────────────
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -250,10 +580,19 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_os::init())
+        .plugin(scoped_storage_plugin())
         .invoke_handler(tauri::generate_handler![
             fetch_latest_release,
             select_directory,
-            download_and_install,
+            download_to_temp,
+            list_dir,
+            read_local_schemas,
+            smart_install,
+            android_open_app,
+            android_pick_directory,
+            android_list_files,
+            android_read_local_schemas,
+            android_smart_extract,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

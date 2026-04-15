@@ -18,6 +18,9 @@ import {
   Apple,
   ExternalLink,
   RefreshCw,
+  FileText,
+  Folder,
+  Info,
 } from "lucide-react"
 
 type OSType = "windows" | "macos" | "linux" | "android" | "ios" | "unknown"
@@ -40,12 +43,24 @@ interface InstallProgress {
   message: string
 }
 
+interface FileItem {
+  name: string
+  is_dir: boolean
+}
+
+interface InstallResult {
+  merged_schemas: string[]
+}
+
 interface RimeInfo {
   name: string
   url: string
   configPath: string
   commands?: string[]
   note?: string
+  nixosNote?: string
+  nixosUrl?: string
+  appPackage?: string
 }
 
 const OS_META: Record<string, { label: string; icon: React.ReactNode; rime: RimeInfo }> = {
@@ -81,6 +96,8 @@ const OS_META: Record<string, { label: string; icon: React.ReactNode; rime: Rime
         "sudo pacman -S fcitx5-rime          # Arch",
         "sudo dnf install fcitx5-rime        # Fedora",
       ],
+      nixosNote: "NixOS 用户请参考专用安装文档",
+      nixosUrl: "https://github.com/xkinput/KeyTao/blob/master/INSTALL_NIXOS.md",
     },
   },
   android: {
@@ -91,6 +108,7 @@ const OS_META: Record<string, { label: string; icon: React.ReactNode; rime: Rime
       url: "https://github.com/osfans/trime/releases",
       configPath: "/sdcard/rime",
       note: "从 GitHub Releases 下载 APK，或通过 F-Droid 安装",
+      appPackage: "com.osfans.trime",
     },
   },
   ios: {
@@ -109,7 +127,7 @@ function InfoRow({ label, children }: { label: string; children: React.ReactNode
   return (
     <div className="flex items-start gap-3 py-2">
       <span className="text-muted-foreground text-xs min-w-24 pt-0.5 shrink-0">{label}</span>
-      <div className="text-sm">{children}</div>
+      <div className="text-sm min-w-0 flex-1">{children}</div>
     </div>
   )
 }
@@ -122,16 +140,88 @@ function CodeBlock({ children }: { children: string }) {
   )
 }
 
+function safUriToDisplayPath(uri: string): string {
+  try {
+    const treeId = decodeURIComponent(uri.split("/tree/")[1] || "")
+    return "/" + treeId.replace("primary:", "sdcard/")
+  } catch {
+    return uri
+  }
+}
+
+function FileList({
+  files,
+  loading,
+  onRefresh,
+  disabled,
+}: {
+  files: FileItem[]
+  loading: boolean
+  onRefresh: () => void
+  disabled: boolean
+}) {
+  return (
+    <div className="rounded-lg border border-border overflow-hidden">
+      <div className="flex items-center justify-between px-3 py-1.5 bg-muted/30 border-b border-border">
+        <span className="text-xs text-muted-foreground">{files.length} 个项目</span>
+        <button
+          onClick={onRefresh}
+          disabled={loading || disabled}
+          className="text-muted-foreground hover:text-foreground disabled:opacity-40 transition-colors"
+          title="刷新"
+        >
+          <RefreshCw className={`h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`} />
+        </button>
+      </div>
+      <div className="max-h-48 overflow-y-auto">
+        {loading ? (
+          <div className="flex items-center justify-center py-6 text-xs text-muted-foreground gap-2">
+            <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+            读取中...
+          </div>
+        ) : files.length === 0 ? (
+          <div className="py-6 text-center text-xs text-muted-foreground">目录为空</div>
+        ) : (
+          files.map((item, i) => (
+            <div
+              key={i}
+              className="flex items-center gap-2 px-3 py-1.5 border-b border-border/40 last:border-0 hover:bg-muted/20"
+            >
+              {item.is_dir ? (
+                <Folder className="h-3.5 w-3.5 text-amber-500 shrink-0" />
+              ) : (
+                <FileText className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+              )}
+              <span className="text-xs font-mono truncate">{item.name}</span>
+            </div>
+          ))
+        )}
+      </div>
+    </div>
+  )
+}
+
 export default function App() {
   const [osType, setOsType] = useState<OSType>("unknown")
   const [releaseInfo, setReleaseInfo] = useState<ReleaseInfo | null>(null)
   const [releaseError, setReleaseError] = useState<string | null>(null)
-  const [selectedDir, setSelectedDir] = useState<string | null>(null)
-  const [progress, setProgress] = useState<InstallProgress | null>(null)
-  const [installSuccess, setInstallSuccess] = useState(false)
-  const [installError, setInstallError] = useState<string | null>(null)
-  const [isInstalling, setIsInstalling] = useState(false)
   const [isFetchingRelease, setIsFetchingRelease] = useState(true)
+
+  // Directory selection
+  const [selectedDir, setSelectedDir] = useState<string | null>(null)   // display path
+  const [safUri, setSafUri] = useState<string | null>(null)             // Android SAF URI
+
+  // File preview
+  const [files, setFiles] = useState<FileItem[]>([])
+  const [isLoadingFiles, setIsLoadingFiles] = useState(false)
+  const [localSchemas, setLocalSchemas] = useState<string[] | null>(null)
+
+  // Install
+  const [progress, setProgress] = useState<InstallProgress | null>(null)
+  const [isInstalling, setIsInstalling] = useState(false)
+  const [installResult, setInstallResult] = useState<InstallResult | null>(null)
+  const [installError, setInstallError] = useState<string | null>(null)
+
   const unlistenRef = useRef<(() => void) | null>(null)
 
   useEffect(() => {
@@ -157,24 +247,92 @@ export default function App() {
   const osMeta = OS_META[osType]
   const downloadUrl = releaseInfo?.download_urls[osType as keyof typeof releaseInfo.download_urls]
 
-  async function handleSelectDir() {
-    const dir = await invoke<string | null>("select_directory")
-    if (dir) {
-      setSelectedDir(dir)
-      setInstallSuccess(false)
-      setInstallError(null)
+  async function loadFiles(path?: string, uri?: string) {
+    setIsLoadingFiles(true)
+    try {
+      if (osType === "android" && uri) {
+        const [items, schemas] = await Promise.all([
+          invoke<FileItem[]>("android_list_files", { treeUri: uri }),
+          invoke<string[]>("android_read_local_schemas", { treeUri: uri }).catch(() => null),
+        ])
+        setFiles(items)
+        setLocalSchemas(schemas)
+      } else if (path) {
+        const [items, schemas] = await Promise.all([
+          invoke<FileItem[]>("list_dir", { path }),
+          invoke<string[]>("read_local_schemas", { path }).catch(() => null),
+        ])
+        setFiles(items)
+        setLocalSchemas(schemas)
+      }
+    } catch {
+      setFiles([])
+      setLocalSchemas(null)
+    } finally {
+      setIsLoadingFiles(false)
     }
+  }
+
+  async function handleSelectDir() {
+    setLocalSchemas(null)
+    setFiles([])
+    if (osType === "android") {
+      try {
+        const { uri } = await invoke<{ uri: string }>("android_pick_directory")
+        const displayPath = safUriToDisplayPath(uri)
+        setSafUri(uri)
+        setSelectedDir(displayPath)
+        setInstallResult(null)
+        setInstallError(null)
+        await loadFiles(undefined, uri)
+      } catch (e) {
+        setInstallError(String(e))
+      }
+    } else {
+      try {
+        const dir = await invoke<string | null>("select_directory")
+        if (dir) {
+          setSelectedDir(dir)
+          setSafUri(null)
+          setInstallResult(null)
+          setInstallError(null)
+          await loadFiles(dir)
+        }
+      } catch (e) {
+        setInstallError(String(e))
+      }
+    }
+  }
+
+  async function handleRefreshFiles() {
+    await loadFiles(selectedDir ?? undefined, safUri ?? undefined)
   }
 
   async function handleInstall() {
     if (!selectedDir || !downloadUrl) return
     setIsInstalling(true)
-    setInstallSuccess(false)
+    setInstallResult(null)
     setInstallError(null)
     setProgress(null)
+
     try {
-      await invoke("download_and_install", { url: downloadUrl, destPath: selectedDir })
-      setInstallSuccess(true)
+      const tempPath = await invoke<string>("download_to_temp", { url: downloadUrl })
+
+      let result: InstallResult
+      if (osType === "android" && safUri) {
+        result = await invoke<InstallResult>("android_smart_extract", {
+          zipPath: tempPath,
+          treeUri: safUri,
+        })
+      } else {
+        result = await invoke<InstallResult>("smart_install", {
+          zipPath: tempPath,
+          destPath: selectedDir,
+        })
+      }
+
+      setInstallResult(result)
+      await loadFiles(selectedDir ?? undefined, safUri ?? undefined)
     } catch (e) {
       setInstallError(String(e))
     } finally {
@@ -204,7 +362,7 @@ export default function App() {
           </p>
         </div>
 
-        {/* Step 1: System Info + Rime Guide */}
+        {/* Step 1: Rime 安装指南 */}
         {osMeta && (
           <Card>
             <CardHeader className="pb-3">
@@ -243,23 +401,52 @@ export default function App() {
                     href={osMeta.rime.url}
                     target="_blank"
                     rel="noreferrer"
-                    className="text-primary hover:underline inline-flex items-center gap-1"
+                    className="text-primary hover:underline inline-flex items-start gap-1 break-all"
                   >
-                    {osMeta.rime.url}
-                    <ExternalLink className="h-3 w-3" />
+                    <span className="break-all">{osMeta.rime.url}</span>
+                    <ExternalLink className="h-3 w-3 shrink-0 mt-0.5" />
                   </a>
                 </InfoRow>
                 <InfoRow label="配置目录">
-                  <code className="text-xs bg-muted px-2 py-0.5 rounded font-mono">
+                  <code className="text-xs bg-muted px-2 py-0.5 rounded font-mono break-all">
                     {osMeta.rime.configPath}
                   </code>
                 </InfoRow>
+                {osMeta.rime.nixosNote && osMeta.rime.nixosUrl && (
+                  <InfoRow label="NixOS">
+                    <a
+                      href={osMeta.rime.nixosUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="text-primary hover:underline inline-flex items-start gap-1"
+                    >
+                      <span className="break-all">{osMeta.rime.nixosNote}</span>
+                      <ExternalLink className="h-3 w-3 shrink-0 mt-0.5" />
+                    </a>
+                  </InfoRow>
+                )}
+                {osMeta.rime.appPackage && (
+                  <InfoRow label="快捷入口">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="gap-1.5 h-7 text-xs"
+                      onClick={() =>
+                        invoke("android_open_app", { packageName: osMeta.rime.appPackage })
+                          .catch((e) => setInstallError(String(e)))
+                      }
+                    >
+                      <ExternalLink className="h-3.5 w-3.5" />
+                      打开{osMeta.rime.name}
+                    </Button>
+                  </InfoRow>
+                )}
               </div>
             </CardContent>
           </Card>
         )}
 
-        {/* Step 2: Install KeyTao */}
+        {/* Step 2: 安装键道方案 */}
         <Card>
           <CardHeader className="pb-3">
             <CardTitle className="text-sm font-semibold flex items-center gap-2">
@@ -315,13 +502,17 @@ export default function App() {
             )}
 
             <div className="flex items-start gap-2 text-sm text-yellow-400/80 bg-yellow-400/8 border border-yellow-400/15 rounded-lg px-3 py-2.5">
-              <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
-              <span>安装将<strong>覆盖目标目录中的同名文件</strong>，请提前备份个人配置与词库</span>
+              <Info className="h-4 w-4 shrink-0 mt-0.5" />
+              <span>
+                智能安装：仅覆盖 <code className="text-xs bg-yellow-400/10 px-1 rounded">opencc/</code>、
+                <code className="text-xs bg-yellow-400/10 px-1 rounded">lua/</code>、键道词库文件，
+                自动合并 <code className="text-xs bg-yellow-400/10 px-1 rounded">default.custom.yaml</code>，其余文件不受影响
+              </span>
             </div>
 
             {/* Directory Selection */}
-            <div className="space-y-2">
-              <div className="flex gap-2">
+            <div className="space-y-3">
+              <div className="flex gap-2 flex-wrap">
                 <Button
                   variant="default"
                   size="sm"
@@ -330,7 +521,7 @@ export default function App() {
                   className="gap-1.5"
                 >
                   <FolderOpen className="h-4 w-4" />
-                  {selectedDir ? "重新选择目录" : "选择安装目录"}
+                  {selectedDir ? "重新选择目录" : "选择 Rime 配置目录"}
                 </Button>
 
                 {selectedDir && downloadUrl && (
@@ -347,12 +538,44 @@ export default function App() {
                 )}
               </div>
 
+              {/* Selected directory + file list */}
               {selectedDir && (
-                <div className="flex items-center gap-2 bg-muted/40 border border-border rounded-lg px-3 py-2">
-                  <CheckCircle2 className="h-4 w-4 text-green-500 shrink-0" />
-                  <code className="text-xs font-mono text-muted-foreground break-all">
-                    {selectedDir}
-                  </code>
+                <div className="space-y-2">
+                  <div className="flex items-center gap-2 bg-muted/40 border border-border rounded-lg px-3 py-2">
+                    <CheckCircle2 className="h-4 w-4 text-green-500 shrink-0" />
+                    <code className="text-xs font-mono text-muted-foreground break-all flex-1 min-w-0">
+                      {selectedDir}
+                    </code>
+                  </div>
+
+                  {localSchemas !== null && (
+                    <div className="flex items-start gap-2 text-xs bg-muted/40 border border-border rounded-lg px-3 py-2">
+                      <Info className="h-3.5 w-3.5 shrink-0 mt-0.5 text-muted-foreground" />
+                      {localSchemas.length === 0 ? (
+                        <span className="text-muted-foreground">未检测到 default.custom.yaml，将自动创建</span>
+                      ) : (
+                        <span className="text-muted-foreground">
+                          检测到本地方案：
+                          {localSchemas.map((s, i) => (
+                            <span key={s}>
+                              <code className="font-mono bg-muted px-1 rounded">{s}</code>
+                              {i < localSchemas.length - 1 && "、"}
+                            </span>
+                          ))}
+                          {localSchemas.some(s => !s.startsWith("keytao")) && (
+                            <span className="text-foreground/70">（非键道方案将被保留）</span>
+                          )}
+                        </span>
+                      )}
+                    </div>
+                  )}
+
+                  <FileList
+                    files={files}
+                    loading={isLoadingFiles}
+                    onRefresh={handleRefreshFiles}
+                    disabled={isInstalling}
+                  />
                 </div>
               )}
             </div>
@@ -366,12 +589,22 @@ export default function App() {
             )}
 
             {/* Result */}
-            {installSuccess && (
-              <div className="flex items-start gap-2 text-sm text-green-400 bg-green-400/10 border border-green-400/20 rounded-lg px-3 py-2.5">
-                <CheckCircle2 className="h-4 w-4 shrink-0 mt-0.5" />
-                <span>安装完成！请在输入法中点击<strong>重新部署</strong>以生效</span>
+            {installResult && (
+              <div className="space-y-2">
+                <div className="flex items-start gap-2 text-sm text-green-400 bg-green-400/10 border border-green-400/20 rounded-lg px-3 py-2.5">
+                  <CheckCircle2 className="h-4 w-4 shrink-0 mt-0.5" />
+                  <div className="space-y-0.5">
+                    <p>安装完成！请在输入法中点击<strong>重新部署</strong>以生效</p>
+                    {installResult.merged_schemas.length > 0 && (
+                      <p className="text-xs text-green-400/80">
+                        已智能合并本地方案：{installResult.merged_schemas.join("、")}
+                      </p>
+                    )}
+                  </div>
+                </div>
               </div>
             )}
+
             {installError && (
               <div className="flex items-start gap-2 text-sm text-destructive bg-destructive/10 border border-destructive/20 rounded-lg px-3 py-2.5">
                 <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />

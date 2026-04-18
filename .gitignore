@@ -24,3 +24,4 @@ dist-ssr
 *.sw?
 
 keytao-installer.jks
+keystore.properties

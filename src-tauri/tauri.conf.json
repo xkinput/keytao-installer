@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "键道安装器",
+  "productName": "keytao-installer",
   "version": "0.1.0",
   "identifier": "ink.rea.keytao-installer",
   "build": {
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "键道安装器",
+        "title": "keytao-installer",
         "width": 800,
         "height": 700
       }

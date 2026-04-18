@@ -360,8 +360,8 @@ export default function App() {
 
         {/* Header */}
         <div className="text-center space-y-2 pb-2">
-          <img src="/logo.png" alt="键道安装器" className="h-16 w-16 mx-auto" />
-          <h1 className="text-2xl font-bold tracking-tight">键道安装器</h1>
+          <img src="/logo.png" alt="keytao-installer" className="h-16 w-16 mx-auto" />
+          <h1 className="text-2xl font-bold tracking-tight">keytao-installer</h1>
           <p className="text-sm text-muted-foreground">
             自动下载最新版键道输入方案并安装到 Rime 配置目录
           </p>

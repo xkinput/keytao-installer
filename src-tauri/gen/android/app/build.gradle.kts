@@ -24,14 +24,11 @@ android {
         versionCode = tauriProperties.getProperty("tauri.android.versionCode", "1").toInt()
         versionName = tauriProperties.getProperty("tauri.android.versionName", "1.0")
     }
-    val keystoreB64 = System.getenv("ANDROID_KEYSTORE")
-    if (keystoreB64 != null) {
-        val keystoreFile = rootProject.layout.buildDirectory.file("release.jks").get().asFile
-        keystoreFile.parentFile.mkdirs()
-        keystoreFile.writeBytes(android.util.Base64.decode(keystoreB64, android.util.Base64.DEFAULT))
+    val keystorePath = System.getenv("ANDROID_KEYSTORE_PATH")
+    if (keystorePath != null) {
         signingConfigs {
             create("release") {
-                storeFile = keystoreFile
+                storeFile = File(keystorePath)
                 storePassword = System.getenv("ANDROID_STORE_PASSWORD")
                 keyAlias = System.getenv("ANDROID_KEY_ALIAS")
                 keyPassword = System.getenv("ANDROID_KEY_PASSWORD")

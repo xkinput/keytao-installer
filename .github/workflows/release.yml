@@ -132,6 +132,11 @@ jobs:
           mv tmp.json src-tauri/tauri.conf.json
 
       - name: Build Android APK
+        env:
+          ANDROID_KEYSTORE: ${{ secrets.ANDROID_KEYSTORE }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          ANDROID_STORE_PASSWORD: ${{ secrets.ANDROID_STORE_PASSWORD }}
         run: |
           export NDK_HOME="$ANDROID_HOME/ndk/27.0.12077973"
           pnpm tauri android build --apk

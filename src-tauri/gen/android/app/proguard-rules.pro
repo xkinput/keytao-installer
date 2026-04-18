@@ -1,3 +1,11 @@
+# Keep Tauri JNI bridge and plugin classes
+-keep class ink.rea.keytao_installer.** { *; }
+-keep class app.tauri.** { *; }
+-keepclassmembers class * {
+    @app.tauri.annotation.Command <methods>;
+    @app.tauri.annotation.ActivityCallback <methods>;
+}
+
 # Add project specific ProGuard rules here.
 # You can control the set of applied configuration files using the
 # proguardFiles setting in build.gradle.

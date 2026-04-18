@@ -207,6 +207,9 @@ export default function App() {
   const [releaseError, setReleaseError] = useState<string | null>(null)
   const [isFetchingRelease, setIsFetchingRelease] = useState(true)
 
+  // Linux IM type selection
+  const [linuxImType, setLinuxImType] = useState<"fcitx5" | "ibus" | null>(null)
+
   // Directory selection
   const [selectedDir, setSelectedDir] = useState<string | null>(null)   // display path
   const [safUri, setSafUri] = useState<string | null>(null)             // Android SAF URI
@@ -290,7 +293,8 @@ export default function App() {
       }
     } else {
       try {
-        const dir = await invoke<string | null>("select_directory")
+        const imType = osType === "linux" ? linuxImType : null
+        const dir = await invoke<string | null>("select_directory", { imType })
         if (dir) {
           setSelectedDir(dir)
           setSafUri(null)
@@ -409,7 +413,11 @@ export default function App() {
                 </InfoRow>
                 <InfoRow label="配置目录">
                   <code className="text-xs bg-muted px-2 py-0.5 rounded font-mono break-all">
-                    {osMeta.rime.configPath}
+                    {osType === "linux"
+                      ? linuxImType === "ibus"
+                        ? "~/.config/ibus/rime"
+                        : "~/.local/share/fcitx5/rime"
+                      : osMeta.rime.configPath}
                   </code>
                 </InfoRow>
                 {osMeta.rime.nixosNote && osMeta.rime.nixosUrl && (
@@ -512,12 +520,34 @@ export default function App() {
 
             {/* Directory Selection */}
             <div className="space-y-3">
+              {osType === "linux" && (
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-muted-foreground shrink-0">输入法框架</span>
+                  <div className="flex gap-1">
+                    {(["fcitx5", "ibus"] as const).map((im) => (
+                      <button
+                        key={im}
+                        onClick={() => setLinuxImType(im)}
+                        disabled={isInstalling}
+                        className={`px-3 py-1 text-xs rounded-md border transition-colors ${
+                          linuxImType === im
+                            ? "bg-primary text-primary-foreground border-primary"
+                            : "bg-transparent text-muted-foreground border-border hover:border-foreground/40 hover:text-foreground"
+                        }`}
+                      >
+                        {im === "fcitx5" ? "Fcitx5" : "iBus"}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               <div className="flex gap-2 flex-wrap">
                 <Button
                   variant="default"
                   size="sm"
                   onClick={handleSelectDir}
-                  disabled={isInstalling}
+                  disabled={isInstalling || (osType === "linux" && linuxImType === null)}
                   className="gap-1.5"
                 >
                   <FolderOpen className="h-4 w-4" />
@@ -537,6 +567,13 @@ export default function App() {
                   </Button>
                 )}
               </div>
+
+              {downloadUrl && (
+                <div className="flex items-center gap-2 text-xs text-muted-foreground bg-muted/30 border border-border rounded-lg px-3 py-2">
+                  <Download className="h-3.5 w-3.5 shrink-0 text-muted-foreground/60" />
+                  <span className="font-mono break-all">{downloadUrl}</span>
+                </div>
+              )}
 
               {/* Selected directory + file list */}
               {selectedDir && (

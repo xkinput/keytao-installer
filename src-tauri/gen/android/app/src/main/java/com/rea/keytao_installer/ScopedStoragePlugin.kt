@@ -147,7 +147,7 @@ class ScopedStoragePlugin(private val activity: Activity) : Plugin(activity) {
                     mergeDefaultCustom(existingContent, it)
                 }
 
-                // Second pass: smart extraction
+                // Second pass: full extraction
                 ZipInputStream(zipFile.inputStream().buffered()).use { zis ->
                     var entry = zis.nextEntry
                     while (entry != null) {
@@ -157,14 +157,11 @@ class ScopedStoragePlugin(private val activity: Activity) : Plugin(activity) {
                             val filename = relative.substringAfterLast('/')
 
                             when {
-                                entry.isDirectory -> {
-                                    if (isKeytaoPath(relative)) ensureDir(root, relative)
-                                }
+                                entry.isDirectory -> ensureDir(root, relative)
                                 isDefaultCustom(filename) && mergeResult != null -> {
                                     writeTextFile(root, relative, mergeResult.mergedContent)
-                                    // don't read from zis — closeEntry below handles skip
                                 }
-                                isKeytaoPath(relative) -> {
+                                else -> {
                                     val dirPart = relative.substringBeforeLast('/', "")
                                     val dir = if (dirPart.isEmpty()) root else ensureDir(root, dirPart)
                                     dir.findFile(filename)?.delete()
@@ -174,7 +171,6 @@ class ScopedStoragePlugin(private val activity: Activity) : Plugin(activity) {
                                         zis.copyTo(out)
                                     }
                                 }
-                                // else: skip
                             }
                         }
 
@@ -196,13 +192,6 @@ class ScopedStoragePlugin(private val activity: Activity) : Plugin(activity) {
     }
 
     // ─── Helpers ────────────────────────────────────────────────────────────────
-
-    private fun isKeytaoPath(relativePath: String): Boolean {
-        val top = relativePath.substringBefore('/')
-        if (top == "opencc" || top == "lua") return true
-        val filename = relativePath.substringAfterLast('/')
-        return filename.startsWith("keytao")
-    }
 
     private fun isDefaultCustom(filename: String) =
         filename == "default.custom.yaml" || filename == "default-custom.yaml"

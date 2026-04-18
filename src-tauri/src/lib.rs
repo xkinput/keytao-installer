@@ -4,6 +4,15 @@ use std::path::PathBuf;
 use tauri::{AppHandle, Emitter, Manager};
 
 #[derive(Serialize, Deserialize, Clone)]
+struct ReleaseCache {
+    etag: String,
+    cached_at: u64,
+    release: ReleaseInfo,
+}
+
+const CACHE_TTL_SECS: u64 = 3600;
+
+#[derive(Serialize, Deserialize, Clone)]
 pub struct DownloadUrls {
     pub macos: Option<String>,
     pub windows: Option<String>,
@@ -45,24 +54,62 @@ fn build_client() -> Result<reqwest::Client, String> {
 }
 
 #[tauri::command]
-async fn fetch_latest_release() -> Result<ReleaseInfo, String> {
-    let client = build_client()?;
+async fn fetch_latest_release(app: AppHandle) -> Result<ReleaseInfo, String> {
+    let cache_path = app
+        .path()
+        .app_cache_dir()
+        .map_err(|e| e.to_string())
+        .map(|d| d.join("release_cache.json"))
+        .ok();
 
-    let response = client
-        .get("https://api.github.com/repos/xkinput/KeyTao/releases/latest")
-        .send()
-        .await
-        .map_err(|e| format!("网络请求失败: {e}"))?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    let cached: Option<ReleaseCache> = cache_path.as_ref().and_then(|p| {
+        std::fs::read_to_string(p)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+    });
+
+    if let Some(ref c) = cached {
+        if now.saturating_sub(c.cached_at) < CACHE_TTL_SECS {
+            return Ok(c.release.clone());
+        }
+    }
+
+    let client = build_client()?;
+    let mut req = client.get("https://api.github.com/repos/xkinput/KeyTao/releases/latest");
+    if let Some(ref c) = cached {
+        req = req.header("If-None-Match", &c.etag);
+    }
+
+    let response = req.send().await.map_err(|e| format!("网络请求失败: {e}"))?;
+
+    if response.status() == 304 {
+        return Ok(cached.unwrap().release);
+    }
 
     if !response.status().is_success() {
         let status = response.status();
         let body: serde_json::Value = response.json().await.unwrap_or_default();
         let msg = body["message"].as_str().unwrap_or("");
         if msg.contains("rate limit") {
+            if let Some(c) = cached {
+                return Ok(c.release);
+            }
             return Err("GitHub API 请求频率超限，请稍后再试".to_string());
         }
         return Err(format!("获取版本信息失败，HTTP {status}: {msg}"));
     }
+
+    let etag = response
+        .headers()
+        .get("etag")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
 
     let release: serde_json::Value = response
         .json()
@@ -102,7 +149,17 @@ async fn fetch_latest_release() -> Result<ReleaseInfo, String> {
         }
     }
 
-    Ok(ReleaseInfo { version, name, published_at, download_urls: urls })
+    let info = ReleaseInfo { version, name, published_at, download_urls: urls };
+
+    if let (Some(path), false) = (cache_path, etag.is_empty()) {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir).ok();
+        }
+        let cache = ReleaseCache { etag, cached_at: now, release: info.clone() };
+        serde_json::to_string(&cache).ok().and_then(|s| std::fs::write(&path, s).ok());
+    }
+
+    Ok(info)
 }
 
 fn rime_default_path() -> Option<PathBuf> {
@@ -122,13 +179,24 @@ fn rime_default_path() -> Option<PathBuf> {
 }
 
 #[tauri::command]
-async fn select_directory(#[allow(unused_variables)] app: AppHandle) -> Result<Option<String>, String> {
+async fn select_directory(#[allow(unused_variables)] app: AppHandle, im_type: Option<String>) -> Result<Option<String>, String> {
     #[cfg(not(target_os = "android"))]
     {
         use tauri_plugin_dialog::{DialogExt, FilePath};
         let (tx, rx) = tokio::sync::oneshot::channel();
         let mut builder = app.dialog().file();
-        if let Some(default) = rime_default_path() {
+        let resolved_default = im_type
+            .as_deref()
+            .and_then(|im| {
+                let home = dirs::home_dir()?;
+                match im {
+                    "fcitx5" => Some(home.join(".local/share/fcitx5/rime")),
+                    "ibus"   => Some(home.join(".config/ibus/rime")),
+                    _ => None,
+                }
+            })
+            .or_else(rime_default_path);
+        if let Some(default) = resolved_default {
             builder = builder.set_directory(default);
         }
         builder.pick_folder(move |folder: Option<FilePath>| {
@@ -170,14 +238,6 @@ fn read_local_schemas(path: String) -> Vec<String> {
     parse_schema_list(&content)
 }
 
-fn is_keytao_file(relative: &str) -> bool {
-    let top = relative.split('/').next().unwrap_or("");
-    if top == "opencc" || top == "lua" {
-        return true;
-    }
-    let filename = relative.rsplit('/').next().unwrap_or(relative);
-    filename.starts_with("keytao")
-}
 
 fn is_default_custom(filename: &str) -> bool {
     filename == "default.custom.yaml" || filename == "default-custom.yaml"
@@ -376,11 +436,8 @@ async fn smart_install<R: tauri::Runtime>(
         };
 
         if is_dir {
-            if is_keytao_file(&relative) {
-                std::fs::create_dir_all(dest.join(&relative)).ok();
-            }
+            std::fs::create_dir_all(dest.join(&relative)).ok();
         } else if Some(&relative) == merged_path.as_ref() {
-            // Write merged default.custom.yaml
             if let Some(ref mc) = merged_content {
                 let out = dest.join(&relative);
                 if let Some(p) = out.parent() {
@@ -389,14 +446,13 @@ async fn smart_install<R: tauri::Runtime>(
                 std::fs::write(&out, mc.as_bytes())
                     .map_err(|e| format!("写入失败 {relative}: {e}"))?;
             }
-        } else if is_keytao_file(&relative) {
+        } else {
             let out = dest.join(&relative);
             if let Some(p) = out.parent() {
                 std::fs::create_dir_all(p).map_err(|e| format!("创建目录失败: {e}"))?;
             }
             std::fs::write(&out, &content).map_err(|e| format!("写入失败 {relative}: {e}"))?;
         }
-        // else: skip
 
         let percent = 61 + ((i + 1) * 39 / total) as u32;
         emit("extracting", percent, &format!("正在安装... {}/{}", i + 1, total));

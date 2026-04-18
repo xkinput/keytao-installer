@@ -119,9 +119,9 @@ jobs:
       - run: pnpm install
 
       - name: Build Android APK
-        run: pnpm tauri android build --apk
-        env:
-          NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/27.0.12077973
+        run: |
+          export NDK_HOME="$ANDROID_HOME/ndk/27.0.12077973"
+          pnpm tauri android build --apk
 
       - name: Upload APK to release
         env:

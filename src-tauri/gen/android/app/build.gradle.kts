@@ -26,9 +26,9 @@ android {
     }
     val keystoreB64 = System.getenv("ANDROID_KEYSTORE")
     if (keystoreB64 != null) {
-        val keystoreFile = File(rootProject.buildDir, "release.jks")
+        val keystoreFile = rootProject.layout.buildDirectory.file("release.jks").get().asFile
         keystoreFile.parentFile.mkdirs()
-        keystoreFile.writeBytes(java.util.Base64.getDecoder().decode(keystoreB64))
+        keystoreFile.writeBytes(android.util.Base64.decode(keystoreB64, android.util.Base64.DEFAULT))
         signingConfigs {
             create("release") {
                 storeFile = keystoreFile

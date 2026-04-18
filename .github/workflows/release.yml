@@ -77,12 +77,18 @@ jobs:
 
       - run: pnpm install
 
+      - name: Extract version from tag
+        id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
+
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           releaseId: ${{ needs.create-release.outputs.release-id }}
-          args: ${{ matrix.args }}
+          args: >-
+            --config '{"version":"${{ steps.version.outputs.version }}"}'
+            ${{ matrix.args }}
 
   build-android:
     needs: create-release
@@ -121,7 +127,8 @@ jobs:
       - name: Build Android APK
         run: |
           export NDK_HOME="$ANDROID_HOME/ndk/27.0.12077973"
-          pnpm tauri android build --apk
+          VERSION="${GITHUB_REF_NAME#v}"
+          pnpm tauri android build --apk --config "{\"version\":\"$VERSION\"}"
 
       - name: Upload APK to release
         env:

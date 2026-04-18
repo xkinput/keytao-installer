@@ -78,6 +78,7 @@ jobs:
       - run: pnpm install
 
       - name: Set version from tag
+        shell: bash
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           jq --arg v "$VERSION" '.version = $v' src-tauri/tauri.conf.json > tmp.json

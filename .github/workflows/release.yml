@@ -134,9 +134,16 @@ jobs:
       - name: Setup Android signing
         run: |
           cd src-tauri/gen/android
+          echo "${{ secrets.ANDROID_KEY_BASE64 }}" | base64 -d > $RUNNER_TEMP/keystore_orig.jks
+          keytool -importkeystore \
+            -srckeystore $RUNNER_TEMP/keystore_orig.jks \
+            -destkeystore $RUNNER_TEMP/keystore.jks \
+            -deststoretype JKS \
+            -srcstorepass "${{ secrets.ANDROID_KEY_PASSWORD }}" \
+            -deststorepass "${{ secrets.ANDROID_KEY_PASSWORD }}" \
+            -noprompt
           echo "keyAlias=${{ secrets.ANDROID_KEY_ALIAS }}" > keystore.properties
           echo "password=${{ secrets.ANDROID_KEY_PASSWORD }}" >> keystore.properties
-          echo "${{ secrets.ANDROID_KEY_BASE64 }}" | base64 -d > $RUNNER_TEMP/keystore.jks
           echo "storeFile=$RUNNER_TEMP/keystore.jks" >> keystore.properties
 
       - name: Build Android APK

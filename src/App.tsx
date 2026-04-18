@@ -549,7 +549,8 @@ export default function App() {
               <span>
                 智能安装：仅覆盖 <code className="text-xs bg-yellow-400/10 px-1 rounded">opencc/</code>、
                 <code className="text-xs bg-yellow-400/10 px-1 rounded">lua/</code>、键道词库文件，
-                自动合并 <code className="text-xs bg-yellow-400/10 px-1 rounded">default.custom.yaml</code>，其余文件不受影响
+                自动合并 <code className="text-xs bg-yellow-400/10 px-1 rounded">default.custom.yaml</code> 和{" "}
+                <code className="text-xs bg-yellow-400/10 px-1 rounded">rime.lua</code>（同名 lua 文件自动重命名保留），其余文件不受影响
               </span>
             </div>
 

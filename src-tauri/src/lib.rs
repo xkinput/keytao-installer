@@ -267,6 +267,89 @@ fn parse_schema_list(content: &str) -> Vec<String> {
     schemas
 }
 
+fn extract_lua_require(line: &str) -> Option<String> {
+    let pos = line.find("require")?;
+    let after = line[pos + 7..].trim_start();
+    if !after.starts_with('(') {
+        return None;
+    }
+    let after = after[1..].trim_start();
+    let quote = after.chars().next()?;
+    if quote != '"' && quote != '\'' {
+        return None;
+    }
+    let content = &after[1..];
+    let end = content.find(quote)?;
+    Some(content[..end].to_string())
+}
+
+fn parse_rime_lua_requires(content: &str) -> Vec<String> {
+    let mut requires = Vec::new();
+    for line in content.lines() {
+        let t = line.trim();
+        if t.starts_with("--") || t.is_empty() {
+            continue;
+        }
+        if let Some(module) = extract_lua_require(t) {
+            if !requires.contains(&module) {
+                requires.push(module);
+            }
+        }
+    }
+    requires
+}
+
+// Returns (merged_rime_lua, renames) where renames is [(old_module, new_module)].
+// Conflicting user modules are renamed to "<name>_user" to avoid overwrite by zip's lua files.
+fn merge_rime_lua(
+    local_content: &str,
+    zip_content: &str,
+    zip_lua_filenames: &std::collections::HashSet<String>,
+) -> (String, Vec<(String, String)>) {
+    use std::collections::HashSet;
+    let zip_requires: HashSet<String> = parse_rime_lua_requires(zip_content).into_iter().collect();
+    let mut renames: Vec<(String, String)> = Vec::new();
+    let mut extra_lines: Vec<String> = Vec::new();
+
+    for line in local_content.lines() {
+        let t = line.trim();
+        if t.is_empty() || t.starts_with("--") {
+            continue;
+        }
+        if let Some(module) = extract_lua_require(t) {
+            if zip_requires.contains(&module) {
+                continue;
+            }
+            let lua_filename = format!("{}.lua", module);
+            if zip_lua_filenames.contains(&lua_filename) {
+                let new_name = format!("{}_user", module);
+                let new_line = line
+                    .replace(&format!("\"{}\"", module), &format!("\"{}\"", new_name))
+                    .replace(&format!("'{}'", module), &format!("'{}'", new_name));
+                renames.push((module, new_name));
+                extra_lines.push(new_line);
+            } else {
+                extra_lines.push(line.to_string());
+            }
+        } else {
+            extra_lines.push(line.to_string());
+        }
+    }
+
+    let mut merged = zip_content.to_string();
+    if !extra_lines.is_empty() {
+        if !merged.ends_with('\n') {
+            merged.push('\n');
+        }
+        for line in &extra_lines {
+            merged.push_str(line);
+            merged.push('\n');
+        }
+    }
+
+    (merged, renames)
+}
+
 fn merge_default_custom(existing: Option<&str>, zip_content: &str) -> (String, Vec<String>) {
     let keytao: Vec<String> = parse_schema_list(zip_content)
         .into_iter()
@@ -380,30 +463,46 @@ async fn smart_install<R: tauri::Runtime>(
     let zip_bytes = std::fs::read(&zip_path).map_err(|e| e.to_string())?;
     let dest = PathBuf::from(&dest_path);
 
-    // First pass: find default.custom.yaml in zip
-    let (merged_path, merged_content, merged_schemas) = {
+    // First pass: collect zip metadata and merge candidates
+    let (merged_dc_path, merged_dc_content, merged_schemas, merged_rime_lua_path, merged_rime_lua_content, renamed_lua_files) = {
+        use std::io::Read;
+        use std::collections::HashSet;
+
         let cursor = std::io::Cursor::new(&zip_bytes);
         let mut archive = zip::ZipArchive::new(cursor).map_err(|e| format!("解压失败: {e}"))?;
 
         let mut zip_dc_path: Option<String> = None;
         let mut zip_dc_content: Option<String> = None;
+        let mut zip_rime_lua_path: Option<String> = None;
+        let mut zip_rime_lua_content: Option<String> = None;
+        let mut zip_lua_filenames: HashSet<String> = HashSet::new();
 
         for i in 0..archive.len() {
             let mut file = archive.by_index(i).map_err(|e| e.to_string())?;
             let raw = file.name().to_string();
-            let relative = raw.splitn(2, '/').nth(1).unwrap_or("").trim_end_matches('/');
-            let filename = relative.rsplit('/').next().unwrap_or(relative);
-            if !file.is_dir() && is_default_custom(filename) {
-                use std::io::Read;
+            let relative = raw.splitn(2, '/').nth(1).unwrap_or("").trim_end_matches('/').to_string();
+            if relative.is_empty() || file.is_dir() {
+                continue;
+            }
+            let filename = relative.rsplit('/').next().unwrap_or(&relative).to_string();
+
+            if is_default_custom(&filename) && zip_dc_path.is_none() {
                 let mut buf = String::new();
                 file.read_to_string(&mut buf).map_err(|e| e.to_string())?;
-                zip_dc_path = Some(relative.to_string());
+                zip_dc_path = Some(relative);
                 zip_dc_content = Some(buf);
-                break;
+            } else if filename == "rime.lua" && !relative.contains('/') && zip_rime_lua_path.is_none() {
+                let mut buf = String::new();
+                file.read_to_string(&mut buf).map_err(|e| e.to_string())?;
+                zip_rime_lua_path = Some(relative);
+                zip_rime_lua_content = Some(buf);
+            } else if relative.starts_with("lua/") && !relative[4..].contains('/') {
+                zip_lua_filenames.insert(filename);
             }
         }
 
-        if let (Some(path), Some(content)) = (zip_dc_path, zip_dc_content) {
+        // Merge default.custom.yaml
+        let (dc_path, dc_content, schemas) = if let (Some(path), Some(content)) = (zip_dc_path, zip_dc_content) {
             let existing = std::fs::read_to_string(dest.join("default.custom.yaml"))
                 .ok()
                 .or_else(|| std::fs::read_to_string(dest.join("default-custom.yaml")).ok());
@@ -411,7 +510,29 @@ async fn smart_install<R: tauri::Runtime>(
             (Some(path), Some(merged), user)
         } else {
             (None, None, Vec::new())
-        }
+        };
+
+        // Merge rime.lua
+        let (rl_path, rl_content, renamed) = if let (Some(path), Some(zip_rl)) = (zip_rime_lua_path, zip_rime_lua_content) {
+            if let Ok(local_rl) = std::fs::read_to_string(dest.join("rime.lua")) {
+                let (merged, renames) = merge_rime_lua(&local_rl, &zip_rl, &zip_lua_filenames);
+                // Read local lua files that need renaming before zip overwrites them
+                let renamed_contents: Vec<(String, Vec<u8>)> = renames
+                    .iter()
+                    .filter_map(|(old, new)| {
+                        let local_file = dest.join("lua").join(format!("{}.lua", old));
+                        std::fs::read(&local_file).ok().map(|bytes| (new.clone(), bytes))
+                    })
+                    .collect();
+                (Some(path), Some(merged), renamed_contents)
+            } else {
+                (Some(path), Some(zip_rl), Vec::new())
+            }
+        } else {
+            (None, None, Vec::new())
+        };
+
+        (dc_path, dc_content, schemas, rl_path, rl_content, renamed)
     };
 
     // Second pass: smart extraction
@@ -438,8 +559,17 @@ async fn smart_install<R: tauri::Runtime>(
 
         if is_dir {
             std::fs::create_dir_all(dest.join(&relative)).ok();
-        } else if Some(&relative) == merged_path.as_ref() {
-            if let Some(ref mc) = merged_content {
+        } else if Some(&relative) == merged_dc_path.as_ref() {
+            if let Some(ref mc) = merged_dc_content {
+                let out = dest.join(&relative);
+                if let Some(p) = out.parent() {
+                    std::fs::create_dir_all(p).ok();
+                }
+                std::fs::write(&out, mc.as_bytes())
+                    .map_err(|e| format!("写入失败 {relative}: {e}"))?;
+            }
+        } else if Some(&relative) == merged_rime_lua_path.as_ref() {
+            if let Some(ref mc) = merged_rime_lua_content {
                 let out = dest.join(&relative);
                 if let Some(p) = out.parent() {
                     std::fs::create_dir_all(p).ok();
@@ -457,6 +587,12 @@ async fn smart_install<R: tauri::Runtime>(
 
         let percent = 61 + ((i + 1) * 39 / total) as u32;
         emit("extracting", percent, &format!("正在安装... {}/{}", i + 1, total));
+    }
+
+    // Write renamed user lua files (saved before zip overwrote them)
+    for (new_module, bytes) in &renamed_lua_files {
+        let out = dest.join("lua").join(format!("{}.lua", new_module));
+        std::fs::write(&out, bytes).map_err(|e| format!("写入重命名文件失败 {new_module}: {e}"))?;
     }
 
     std::fs::remove_file(&zip_path).ok();

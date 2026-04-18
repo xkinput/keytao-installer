@@ -140,5 +140,8 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          VERSION="${GITHUB_REF_NAME#v}"
           APK=$(find src-tauri/gen/android -name "*.apk" | grep -v "/test/" | head -1)
-          gh release upload ${{ github.ref_name }} "$APK" --clobber
+          RENAMED="keytao-installer_${VERSION}_android.apk"
+          cp "$APK" "$RENAMED"
+          gh release upload ${{ github.ref_name }} "$RENAMED" --clobber

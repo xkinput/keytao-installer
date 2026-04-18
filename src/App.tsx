@@ -359,7 +359,8 @@ export default function App() {
       <div className="max-w-2xl mx-auto px-4 py-8 space-y-4">
 
         {/* Header */}
-        <div className="text-center space-y-1 pb-2">
+        <div className="text-center space-y-2 pb-2">
+          <img src="/logo.png" alt="键道安装器" className="h-16 w-16 mx-auto" />
           <h1 className="text-2xl font-bold tracking-tight">键道安装器</h1>
           <p className="text-sm text-muted-foreground">
             自动下载最新版键道输入方案并安装到 Rime 配置目录

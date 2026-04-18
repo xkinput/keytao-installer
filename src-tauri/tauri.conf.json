@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "keytao-installer",
+        "title": "键道安装器",
         "width": 800,
         "height": 700
       }

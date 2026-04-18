@@ -131,15 +131,15 @@ jobs:
           jq --arg v "$VERSION" '.version = $v' src-tauri/tauri.conf.json > tmp.json
           mv tmp.json src-tauri/tauri.conf.json
 
-      - name: Decode keystore
-        run: echo "${{ secrets.ANDROID_KEYSTORE }}" | base64 -d > /tmp/release.jks
+      - name: Setup Android signing
+        run: |
+          cd src-tauri/gen/android
+          echo "keyAlias=${{ secrets.ANDROID_KEY_ALIAS }}" > keystore.properties
+          echo "password=${{ secrets.ANDROID_KEY_PASSWORD }}" >> keystore.properties
+          base64 -d <<< "${{ secrets.ANDROID_KEY_BASE64 }}" > $RUNNER_TEMP/keystore.jks
+          echo "storeFile=$RUNNER_TEMP/keystore.jks" >> keystore.properties
 
       - name: Build Android APK
-        env:
-          ANDROID_KEYSTORE_PATH: /tmp/release.jks
-          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
-          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
-          ANDROID_STORE_PASSWORD: ${{ secrets.ANDROID_STORE_PASSWORD }}
         run: |
           export NDK_HOME="$ANDROID_HOME/ndk/27.0.12077973"
           pnpm tauri android build --apk

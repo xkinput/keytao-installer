@@ -1,4 +1,5 @@
 import java.util.Properties
+import java.io.FileInputStream
 
 plugins {
     id("com.android.application")
@@ -24,15 +25,17 @@ android {
         versionCode = tauriProperties.getProperty("tauri.android.versionCode", "1").toInt()
         versionName = tauriProperties.getProperty("tauri.android.versionName", "1.0")
     }
-    val keystorePath = System.getenv("ANDROID_KEYSTORE_PATH")
-    if (keystorePath != null) {
-        signingConfigs {
-            create("release") {
-                storeFile = File(keystorePath)
-                storePassword = System.getenv("ANDROID_STORE_PASSWORD")
-                keyAlias = System.getenv("ANDROID_KEY_ALIAS")
-                keyPassword = System.getenv("ANDROID_KEY_PASSWORD")
+    signingConfigs {
+        create("release") {
+            val keystorePropertiesFile = rootProject.file("keystore.properties")
+            val keystoreProperties = Properties()
+            if (keystorePropertiesFile.exists()) {
+                keystoreProperties.load(FileInputStream(keystorePropertiesFile))
             }
+            keyAlias = keystoreProperties["keyAlias"] as? String
+            keyPassword = keystoreProperties["password"] as? String
+            storeFile = (keystoreProperties["storeFile"] as? String)?.let { file(it) }
+            storePassword = keystoreProperties["password"] as? String
         }
     }
     buildTypes {
@@ -54,8 +57,7 @@ android {
                     .plus(getDefaultProguardFile("proguard-android-optimize.txt"))
                     .toList().toTypedArray()
             )
-            val releaseSigning = signingConfigs.findByName("release")
-            if (releaseSigning != null) signingConfig = releaseSigning
+            signingConfig = signingConfigs.getByName("release")
         }
     }
     kotlinOptions {

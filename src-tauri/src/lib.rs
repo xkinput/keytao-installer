@@ -476,7 +476,7 @@ fn scoped_storage_plugin<R: tauri::Runtime>() -> tauri::plugin::TauriPlugin<R> {
             #[cfg(target_os = "android")]
             {
                 let handle = api.register_android_plugin(
-                    "com.rea.keytao_installer",
+                    "ink.rea.keytao_installer",
                     "ScopedStoragePlugin",
                 )?;
                 app.manage(ScopedStorageHandle(handle));

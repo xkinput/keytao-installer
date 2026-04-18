@@ -46,9 +46,10 @@ pub struct InstallResult {
     pub merged_schemas: Vec<String>,
 }
 
-fn build_client() -> Result<reqwest::Client, String> {
+fn build_client(app: &AppHandle) -> Result<reqwest::Client, String> {
+    let version = app.package_info().version.to_string();
     reqwest::Client::builder()
-        .user_agent("keytao-installer/0.1.0")
+        .user_agent(format!("keytao-installer/{version}"))
         .build()
         .map_err(|e| e.to_string())
 }
@@ -79,7 +80,7 @@ async fn fetch_latest_release(app: AppHandle) -> Result<ReleaseInfo, String> {
         }
     }
 
-    let client = build_client()?;
+    let client = build_client(&app)?;
     let mut req = client.get("https://api.github.com/repos/xkinput/KeyTao/releases/latest");
     if let Some(ref c) = cached {
         req = req.header("If-None-Match", &c.etag);
@@ -313,7 +314,7 @@ async fn download_to_temp(app: AppHandle, url: String) -> Result<String, String>
 
     emit("downloading", 0, "正在下载...");
 
-    let client = build_client()?;
+    let client = build_client(&app)?;
     let response = client
         .get(&url)
         .send()
@@ -628,6 +629,31 @@ async fn android_smart_extract<R: tauri::Runtime>(
     }
 }
 
+#[derive(Serialize)]
+pub struct InstallerUpdateInfo {
+    pub current_version: String,
+    pub latest_version: String,
+    pub has_update: bool,
+    pub release_url: String,
+}
+
+#[tauri::command]
+async fn check_installer_update(app: AppHandle) -> Result<InstallerUpdateInfo, String> {
+    let current = app.package_info().version.to_string();
+    let client = build_client(&app)?;
+    let resp = client
+        .get("https://api.github.com/repos/xkinput/keytao-installer/releases/latest")
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    let latest_tag = json["tag_name"].as_str().unwrap_or("").to_string();
+    let latest = latest_tag.trim_start_matches('v').to_string();
+    let release_url = json["html_url"].as_str().unwrap_or("").to_string();
+    let has_update = !latest.is_empty() && latest != current;
+    Ok(InstallerUpdateInfo { current_version: current, latest_version: latest, has_update, release_url })
+}
+
 // ─── Entry point ─────────────────────────────────────────────────────────────
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -638,6 +664,7 @@ pub fn run() {
         .plugin(tauri_plugin_os::init())
         .plugin(scoped_storage_plugin())
         .invoke_handler(tauri::generate_handler![
+            check_installer_update,
             fetch_latest_release,
             select_directory,
             download_to_temp,

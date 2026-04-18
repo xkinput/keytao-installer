@@ -25,6 +25,13 @@ import {
 
 type OSType = "windows" | "macos" | "linux" | "android" | "ios" | "unknown"
 
+interface InstallerUpdateInfo {
+  current_version: string
+  latest_version: string
+  has_update: boolean
+  release_url: string
+}
+
 interface ReleaseInfo {
   version: string
   name: string
@@ -206,6 +213,7 @@ export default function App() {
   const [releaseInfo, setReleaseInfo] = useState<ReleaseInfo | null>(null)
   const [releaseError, setReleaseError] = useState<string | null>(null)
   const [isFetchingRelease, setIsFetchingRelease] = useState(true)
+  const [installerUpdate, setInstallerUpdate] = useState<InstallerUpdateInfo | null>(null)
 
   // Linux IM type selection
   const [linuxImType, setLinuxImType] = useState<"fcitx5" | "ibus" | null>(null)
@@ -239,6 +247,10 @@ export default function App() {
       .then(setReleaseInfo)
       .catch((e) => setReleaseError(String(e)))
       .finally(() => setIsFetchingRelease(false))
+
+    invoke<InstallerUpdateInfo>("check_installer_update")
+      .then((info) => { if (info.has_update) setInstallerUpdate(info) })
+      .catch(() => {})
 
     listen<InstallProgress>("install-progress", (e) => {
       setProgress(e.payload)
@@ -366,6 +378,28 @@ export default function App() {
             自动下载最新版键道输入方案并安装到 Rime 配置目录
           </p>
         </div>
+
+        {/* Installer update banner */}
+        {installerUpdate && (
+          <a
+            href={installerUpdate.release_url}
+            target="_blank"
+            rel="noreferrer"
+            className="flex items-center justify-between gap-3 px-4 py-2.5 rounded-lg border border-primary/30 bg-primary/5 text-sm hover:bg-primary/10 transition-colors"
+          >
+            <div className="flex items-center gap-2">
+              <Download className="h-4 w-4 text-primary shrink-0" />
+              <span>安装器有新版本可用</span>
+              <Badge variant="secondary" className="font-mono text-xs">
+                v{installerUpdate.latest_version}
+              </Badge>
+            </div>
+            <div className="flex items-center gap-2 text-muted-foreground text-xs shrink-0">
+              <span>当前 v{installerUpdate.current_version}</span>
+              <ExternalLink className="h-3 w-3" />
+            </div>
+          </a>
+        )}
 
         {/* Step 1: Rime 安装指南 */}
         {osMeta && (

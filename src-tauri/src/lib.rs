@@ -10,7 +10,6 @@ struct ReleaseCache {
     release: ReleaseInfo,
 }
 
-const CACHE_TTL_SECS: u64 = 3600;
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct DownloadUrls {
@@ -73,12 +72,6 @@ async fn fetch_latest_release(app: AppHandle) -> Result<ReleaseInfo, String> {
             .ok()
             .and_then(|s| serde_json::from_str(&s).ok())
     });
-
-    if let Some(ref c) = cached {
-        if now.saturating_sub(c.cached_at) < CACHE_TTL_SECS {
-            return Ok(c.release.clone());
-        }
-    }
 
     let client = build_client(&app)?;
     let mut req = client.get("https://api.github.com/repos/xkinput/KeyTao/releases/latest");

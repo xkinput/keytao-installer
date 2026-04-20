@@ -8,6 +8,13 @@ import { Progress } from "@/components/ui/progress"
 import { Badge } from "@/components/ui/badge"
 import { Separator } from "@/components/ui/separator"
 import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+} from "@/components/ui/dialog"
+import {
   FolderOpen,
   Download,
   CheckCircle2,
@@ -495,25 +502,26 @@ export default function App() {
             <CardTitle className="text-sm font-semibold flex items-center gap-2">
               <span className="flex items-center justify-center w-5 h-5 rounded-full bg-primary text-primary-foreground text-xs font-bold">2</span>
               安装键道方案
-              {releaseInfo && (
-                <Badge variant="secondary" className="ml-auto font-mono text-xs">
-                  {releaseInfo.version}
-                </Badge>
-              )}
-              {isFetchingRelease && (
-                <RefreshCw className="ml-auto h-3.5 w-3.5 animate-spin text-muted-foreground" />
-              )}
-              {releaseError && !isFetchingRelease && (
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  className="ml-auto h-6 w-6"
-                  onClick={handleRefetchRelease}
-                  title="重试获取版本信息"
-                >
-                  <RefreshCw className="h-3.5 w-3.5" />
-                </Button>
-              )}
+              <div className="ml-auto flex items-center gap-1.5">
+                {releaseInfo && (
+                  <Badge variant="secondary" className="font-mono text-xs">
+                    {releaseInfo.version}
+                  </Badge>
+                )}
+                {isFetchingRelease ? (
+                  <RefreshCw className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
+                ) : (
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="h-6 w-6"
+                    onClick={handleRefetchRelease}
+                    title="检查新版本"
+                  >
+                    <RefreshCw className="h-3.5 w-3.5" />
+                  </Button>
+                )}
+              </div>
             </CardTitle>
           </CardHeader>
           <CardContent className="space-y-4">
@@ -604,12 +612,6 @@ export default function App() {
                 )}
               </div>
 
-              {downloadUrl && (
-                <div className="flex items-center gap-2 text-xs text-muted-foreground bg-muted/30 border border-border rounded-lg px-3 py-2">
-                  <Download className="h-3.5 w-3.5 shrink-0 text-muted-foreground/60" />
-                  <span className="font-mono break-all">{downloadUrl}</span>
-                </div>
-              )}
 
               {/* Selected directory + file list */}
               {selectedDir && (
@@ -661,23 +663,6 @@ export default function App() {
               </div>
             )}
 
-            {/* Result */}
-            {installResult && (
-              <div className="space-y-2">
-                <div className="flex items-start gap-2 text-sm text-green-400 bg-green-400/10 border border-green-400/20 rounded-lg px-3 py-2.5">
-                  <CheckCircle2 className="h-4 w-4 shrink-0 mt-0.5" />
-                  <div className="space-y-0.5">
-                    <p>安装完成！请在输入法中点击<strong>重新部署</strong>以生效</p>
-                    {installResult.merged_schemas.length > 0 && (
-                      <p className="text-xs text-green-400/80">
-                        已智能合并本地方案：{installResult.merged_schemas.join("、")}
-                      </p>
-                    )}
-                  </div>
-                </div>
-              </div>
-            )}
-
             {installError && (
               <div className="flex items-start gap-2 text-sm text-destructive bg-destructive/10 border border-destructive/20 rounded-lg px-3 py-2.5">
                 <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
@@ -686,6 +671,38 @@ export default function App() {
             )}
           </CardContent>
         </Card>
+
+        <Dialog open={!!installResult} onOpenChange={(open) => { if (!open) setInstallResult(null) }}>
+          <DialogContent className="max-w-sm">
+            <DialogHeader>
+              <DialogTitle className="flex items-center gap-2 text-green-400">
+                <CheckCircle2 className="h-5 w-5 shrink-0" />
+                安装完成
+              </DialogTitle>
+              <DialogDescription asChild>
+                <div className="space-y-2 pt-1">
+                  <p className="text-sm text-foreground">
+                    请在输入法中点击<strong>重新部署</strong>以生效
+                  </p>
+                  {installResult && installResult.merged_schemas.length > 0 && (
+                    <p className="text-xs text-muted-foreground">
+                      已智能合并本地方案：
+                      {installResult.merged_schemas.map((s, i) => (
+                        <span key={s}>
+                          <code className="font-mono bg-muted px-1 rounded">{s}</code>
+                          {i < installResult.merged_schemas.length - 1 && "、"}
+                        </span>
+                      ))}
+                    </p>
+                  )}
+                </div>
+              </DialogDescription>
+            </DialogHeader>
+            <Button onClick={() => setInstallResult(null)} className="w-full mt-2">
+              好的
+            </Button>
+          </DialogContent>
+        </Dialog>
 
       </div>
     </div>

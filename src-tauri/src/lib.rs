@@ -10,7 +10,6 @@ struct ReleaseCache {
     release: ReleaseInfo,
 }
 
-
 #[derive(Serialize, Deserialize, Clone)]
 pub struct DownloadUrls {
     pub macos: Option<String>,
@@ -43,6 +42,7 @@ pub struct FileItem {
 #[derive(Serialize, Clone)]
 pub struct InstallResult {
     pub merged_schemas: Vec<String>,
+    pub logs: Vec<String>,
 }
 
 fn build_client(app: &AppHandle) -> Result<reqwest::Client, String> {
@@ -110,7 +110,10 @@ async fn fetch_latest_release(app: AppHandle) -> Result<ReleaseInfo, String> {
         .await
         .map_err(|e| format!("解析响应失败: {e}"))?;
 
-    let version = release["tag_name"].as_str().unwrap_or("unknown").to_string();
+    let version = release["tag_name"]
+        .as_str()
+        .unwrap_or("unknown")
+        .to_string();
     let name = release["name"].as_str().unwrap_or("").to_string();
     let published_at = release["published_at"].as_str().unwrap_or("").to_string();
 
@@ -143,14 +146,25 @@ async fn fetch_latest_release(app: AppHandle) -> Result<ReleaseInfo, String> {
         }
     }
 
-    let info = ReleaseInfo { version, name, published_at, download_urls: urls };
+    let info = ReleaseInfo {
+        version,
+        name,
+        published_at,
+        download_urls: urls,
+    };
 
     if let (Some(path), false) = (cache_path, etag.is_empty()) {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir).ok();
         }
-        let cache = ReleaseCache { etag, cached_at: now, release: info.clone() };
-        serde_json::to_string(&cache).ok().and_then(|s| std::fs::write(&path, s).ok());
+        let cache = ReleaseCache {
+            etag,
+            cached_at: now,
+            release: info.clone(),
+        };
+        serde_json::to_string(&cache)
+            .ok()
+            .and_then(|s| std::fs::write(&path, s).ok());
     }
 
     Ok(info)
@@ -158,22 +172,37 @@ async fn fetch_latest_release(app: AppHandle) -> Result<ReleaseInfo, String> {
 
 fn rime_default_path() -> Option<PathBuf> {
     #[cfg(target_os = "macos")]
-    { dirs::home_dir().map(|h| h.join("Library/Rime")) }
+    {
+        dirs::home_dir().map(|h| h.join("Library/Rime"))
+    }
     #[cfg(target_os = "windows")]
-    { dirs::config_dir().map(|c| c.join("Rime")) }
+    {
+        dirs::config_dir().map(|c| c.join("Rime"))
+    }
     #[cfg(target_os = "linux")]
     {
         let home = dirs::home_dir()?;
         let fcitx5 = home.join(".local/share/fcitx5/rime");
         let ibus = home.join(".config/ibus/rime");
-        if fcitx5.exists() { Some(fcitx5) } else if ibus.exists() { Some(ibus) } else { Some(fcitx5) }
+        if fcitx5.exists() {
+            Some(fcitx5)
+        } else if ibus.exists() {
+            Some(ibus)
+        } else {
+            Some(fcitx5)
+        }
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
-    { None }
+    {
+        None
+    }
 }
 
 #[tauri::command]
-async fn select_directory(#[allow(unused_variables)] app: AppHandle, im_type: Option<String>) -> Result<Option<String>, String> {
+async fn select_directory(
+    #[allow(unused_variables)] app: AppHandle,
+    im_type: Option<String>,
+) -> Result<Option<String>, String> {
     #[cfg(not(target_os = "android"))]
     {
         use tauri_plugin_dialog::{DialogExt, FilePath};
@@ -185,7 +214,7 @@ async fn select_directory(#[allow(unused_variables)] app: AppHandle, im_type: Op
                 let home = dirs::home_dir()?;
                 match im {
                     "fcitx5" => Some(home.join(".local/share/fcitx5/rime")),
-                    "ibus"   => Some(home.join(".config/ibus/rime")),
+                    "ibus" => Some(home.join(".config/ibus/rime")),
                     _ => None,
                 }
             })
@@ -232,7 +261,6 @@ fn read_local_schemas(path: String) -> Vec<String> {
     parse_schema_list(&content)
 }
 
-
 fn is_default_custom(filename: &str) -> bool {
     filename == "default.custom.yaml" || filename == "default-custom.yaml"
 }
@@ -278,8 +306,19 @@ fn extract_lua_require(line: &str) -> Option<String> {
 
 fn parse_rime_lua_requires(content: &str) -> Vec<String> {
     let mut requires = Vec::new();
+    let mut in_block_comment = false;
     for line in content.lines() {
         let t = line.trim();
+        if in_block_comment {
+            if t.contains("--]]") {
+                in_block_comment = false;
+            }
+            continue;
+        }
+        if t.starts_with("--[[") {
+            in_block_comment = true;
+            continue;
+        }
         if t.starts_with("--") || t.is_empty() {
             continue;
         }
@@ -303,9 +342,20 @@ fn merge_rime_lua(
     let zip_requires: HashSet<String> = parse_rime_lua_requires(zip_content).into_iter().collect();
     let mut renames: Vec<(String, String)> = Vec::new();
     let mut extra_lines: Vec<String> = Vec::new();
+    let mut in_block_comment = false;
 
     for line in local_content.lines() {
         let t = line.trim();
+        if in_block_comment {
+            if t.contains("--]]") {
+                in_block_comment = false;
+            }
+            continue;
+        }
+        if t.starts_with("--[[") {
+            in_block_comment = true;
+            continue;
+        }
         if t.is_empty() || t.starts_with("--") {
             continue;
         }
@@ -349,7 +399,12 @@ fn merge_default_custom(existing: Option<&str>, zip_content: &str) -> (String, V
         .filter(|s| s.starts_with("keytao"))
         .collect();
     let user: Vec<String> = existing
-        .map(|c| parse_schema_list(c).into_iter().filter(|s| !s.starts_with("keytao")).collect())
+        .map(|c| {
+            parse_schema_list(c)
+                .into_iter()
+                .filter(|s| !s.starts_with("keytao"))
+                .collect()
+        })
         .unwrap_or_default();
     let all: Vec<String> = user.iter().chain(keytao.iter()).cloned().collect();
 
@@ -381,11 +436,14 @@ fn merge_default_custom(existing: Option<&str>, zip_content: &str) -> (String, V
 #[tauri::command]
 async fn download_to_temp(app: AppHandle, url: String) -> Result<String, String> {
     let emit = |stage: &str, percent: u32, message: &str| {
-        let _ = app.emit("install-progress", InstallProgress {
-            stage: stage.to_string(),
-            percent,
-            message: message.to_string(),
-        });
+        let _ = app.emit(
+            "install-progress",
+            InstallProgress {
+                stage: stage.to_string(),
+                percent,
+                message: message.to_string(),
+            },
+        );
     };
 
     emit("downloading", 0, "正在下载...");
@@ -444,11 +502,14 @@ async fn smart_install<R: tauri::Runtime>(
     dest_path: String,
 ) -> Result<InstallResult, String> {
     let emit = |stage: &str, percent: u32, message: &str| {
-        let _ = app.emit("install-progress", InstallProgress {
-            stage: stage.to_string(),
-            percent,
-            message: message.to_string(),
-        });
+        let _ = app.emit(
+            "install-progress",
+            InstallProgress {
+                stage: stage.to_string(),
+                percent,
+                message: message.to_string(),
+            },
+        );
     };
 
     emit("extracting", 61, "正在解压...");
@@ -457,9 +518,16 @@ async fn smart_install<R: tauri::Runtime>(
     let dest = PathBuf::from(&dest_path);
 
     // First pass: collect zip metadata and merge candidates
-    let (merged_dc_path, merged_dc_content, merged_schemas, merged_rime_lua_path, merged_rime_lua_content, renamed_lua_files) = {
-        use std::io::Read;
+    let (
+        merged_dc_path,
+        merged_dc_content,
+        merged_schemas,
+        merged_rime_lua_path,
+        merged_rime_lua_content,
+        renamed_lua_files,
+    ) = {
         use std::collections::HashSet;
+        use std::io::Read;
 
         let cursor = std::io::Cursor::new(&zip_bytes);
         let mut archive = zip::ZipArchive::new(cursor).map_err(|e| format!("解压失败: {e}"))?;
@@ -473,7 +541,12 @@ async fn smart_install<R: tauri::Runtime>(
         for i in 0..archive.len() {
             let mut file = archive.by_index(i).map_err(|e| e.to_string())?;
             let raw = file.name().to_string();
-            let relative = raw.splitn(2, '/').nth(1).unwrap_or("").trim_end_matches('/').to_string();
+            let relative = raw
+                .splitn(2, '/')
+                .nth(1)
+                .unwrap_or("")
+                .trim_end_matches('/')
+                .to_string();
             if relative.is_empty() || file.is_dir() {
                 continue;
             }
@@ -484,7 +557,10 @@ async fn smart_install<R: tauri::Runtime>(
                 file.read_to_string(&mut buf).map_err(|e| e.to_string())?;
                 zip_dc_path = Some(relative);
                 zip_dc_content = Some(buf);
-            } else if filename == "rime.lua" && !relative.contains('/') && zip_rime_lua_path.is_none() {
+            } else if filename == "rime.lua"
+                && !relative.contains('/')
+                && zip_rime_lua_path.is_none()
+            {
                 let mut buf = String::new();
                 file.read_to_string(&mut buf).map_err(|e| e.to_string())?;
                 zip_rime_lua_path = Some(relative);
@@ -495,35 +571,39 @@ async fn smart_install<R: tauri::Runtime>(
         }
 
         // Merge default.custom.yaml
-        let (dc_path, dc_content, schemas) = if let (Some(path), Some(content)) = (zip_dc_path, zip_dc_content) {
-            let existing = std::fs::read_to_string(dest.join("default.custom.yaml"))
-                .ok()
-                .or_else(|| std::fs::read_to_string(dest.join("default-custom.yaml")).ok());
-            let (merged, user) = merge_default_custom(existing.as_deref(), &content);
-            (Some(path), Some(merged), user)
-        } else {
-            (None, None, Vec::new())
-        };
+        let (dc_path, dc_content, schemas) =
+            if let (Some(path), Some(content)) = (zip_dc_path, zip_dc_content) {
+                let existing = std::fs::read_to_string(dest.join("default.custom.yaml"))
+                    .ok()
+                    .or_else(|| std::fs::read_to_string(dest.join("default-custom.yaml")).ok());
+                let (merged, user) = merge_default_custom(existing.as_deref(), &content);
+                (Some(path), Some(merged), user)
+            } else {
+                (None, None, Vec::new())
+            };
 
         // Merge rime.lua
-        let (rl_path, rl_content, renamed) = if let (Some(path), Some(zip_rl)) = (zip_rime_lua_path, zip_rime_lua_content) {
-            if let Ok(local_rl) = std::fs::read_to_string(dest.join("rime.lua")) {
-                let (merged, renames) = merge_rime_lua(&local_rl, &zip_rl, &zip_lua_filenames);
-                // Read local lua files that need renaming before zip overwrites them
-                let renamed_contents: Vec<(String, Vec<u8>)> = renames
-                    .iter()
-                    .filter_map(|(old, new)| {
-                        let local_file = dest.join("lua").join(format!("{}.lua", old));
-                        std::fs::read(&local_file).ok().map(|bytes| (new.clone(), bytes))
-                    })
-                    .collect();
-                (Some(path), Some(merged), renamed_contents)
+        let (rl_path, rl_content, renamed) =
+            if let (Some(path), Some(zip_rl)) = (zip_rime_lua_path, zip_rime_lua_content) {
+                if let Ok(local_rl) = std::fs::read_to_string(dest.join("rime.lua")) {
+                    let (merged, renames) = merge_rime_lua(&local_rl, &zip_rl, &zip_lua_filenames);
+                    // Read local lua files that need renaming before zip overwrites them
+                    let renamed_contents: Vec<(String, Vec<u8>)> = renames
+                        .iter()
+                        .filter_map(|(old, new)| {
+                            let local_file = dest.join("lua").join(format!("{}.lua", old));
+                            std::fs::read(&local_file)
+                                .ok()
+                                .map(|bytes| (new.clone(), bytes))
+                        })
+                        .collect();
+                    (Some(path), Some(merged), renamed_contents)
+                } else {
+                    (Some(path), Some(zip_rl), Vec::new())
+                }
             } else {
-                (Some(path), Some(zip_rl), Vec::new())
-            }
-        } else {
-            (None, None, Vec::new())
-        };
+                (None, None, Vec::new())
+            };
 
         (dc_path, dc_content, schemas, rl_path, rl_content, renamed)
     };
@@ -532,12 +612,18 @@ async fn smart_install<R: tauri::Runtime>(
     let cursor = std::io::Cursor::new(&zip_bytes);
     let mut archive = zip::ZipArchive::new(cursor).map_err(|e| format!("解压失败: {e}"))?;
     let total = archive.len();
+    let mut logs: Vec<String> = Vec::new();
 
     for i in 0..total {
         let (relative, is_dir, content) = {
             let mut file = archive.by_index(i).map_err(|e| e.to_string())?;
             let raw = file.name().to_string();
-            let relative = raw.splitn(2, '/').nth(1).unwrap_or("").trim_end_matches('/').to_string();
+            let relative = raw
+                .splitn(2, '/')
+                .nth(1)
+                .unwrap_or("")
+                .trim_end_matches('/')
+                .to_string();
             if relative.is_empty() {
                 continue;
             }
@@ -551,15 +637,22 @@ async fn smart_install<R: tauri::Runtime>(
         };
 
         if is_dir {
-            std::fs::create_dir_all(dest.join(&relative)).ok();
+            if let Err(e) = std::fs::create_dir_all(dest.join(&relative)) {
+                logs.push(format!("[WARN] mkdir {relative}: {e}"));
+            }
         } else if Some(&relative) == merged_dc_path.as_ref() {
             if let Some(ref mc) = merged_dc_content {
                 let out = dest.join(&relative);
                 if let Some(p) = out.parent() {
                     std::fs::create_dir_all(p).ok();
                 }
-                std::fs::write(&out, mc.as_bytes())
-                    .map_err(|e| format!("写入失败 {relative}: {e}"))?;
+                match std::fs::write(&out, mc.as_bytes()) {
+                    Ok(_) => logs.push(format!("[MERGED] {relative}")),
+                    Err(e) => {
+                        logs.push(format!("[ERROR] {relative}: {e}"));
+                        return Err(format!("写入失败 {relative}: {e}"));
+                    }
+                }
             }
         } else if Some(&relative) == merged_rime_lua_path.as_ref() {
             if let Some(ref mc) = merged_rime_lua_content {
@@ -567,31 +660,58 @@ async fn smart_install<R: tauri::Runtime>(
                 if let Some(p) = out.parent() {
                     std::fs::create_dir_all(p).ok();
                 }
-                std::fs::write(&out, mc.as_bytes())
-                    .map_err(|e| format!("写入失败 {relative}: {e}"))?;
+                match std::fs::write(&out, mc.as_bytes()) {
+                    Ok(_) => logs.push(format!("[MERGED] {relative}")),
+                    Err(e) => {
+                        logs.push(format!("[ERROR] {relative}: {e}"));
+                        return Err(format!("写入失败 {relative}: {e}"));
+                    }
+                }
             }
         } else {
             let out = dest.join(&relative);
             if let Some(p) = out.parent() {
-                std::fs::create_dir_all(p).map_err(|e| format!("创建目录失败: {e}"))?;
+                if let Err(e) = std::fs::create_dir_all(p) {
+                    logs.push(format!("[ERROR] mkdir for {relative}: {e}"));
+                    return Err(format!("创建目录失败: {e}"));
+                }
             }
-            std::fs::write(&out, &content).map_err(|e| format!("写入失败 {relative}: {e}"))?;
+            match std::fs::write(&out, &content) {
+                Ok(_) => logs.push(format!("[OK] {relative}")),
+                Err(e) => {
+                    logs.push(format!("[ERROR] {relative}: {e}"));
+                    return Err(format!("写入失败 {relative}: {e}"));
+                }
+            }
         }
 
         let percent = 61 + ((i + 1) * 39 / total) as u32;
-        emit("extracting", percent, &format!("正在安装... {}/{}", i + 1, total));
+        emit(
+            "extracting",
+            percent,
+            &format!("正在安装... {}/{}", i + 1, total),
+        );
     }
 
     // Write renamed user lua files (saved before zip overwrote them)
     for (new_module, bytes) in &renamed_lua_files {
         let out = dest.join("lua").join(format!("{}.lua", new_module));
-        std::fs::write(&out, bytes).map_err(|e| format!("写入重命名文件失败 {new_module}: {e}"))?;
+        match std::fs::write(&out, bytes) {
+            Ok(_) => logs.push(format!("[RENAMED] lua/{new_module}.lua")),
+            Err(e) => {
+                logs.push(format!("[ERROR] rename lua/{new_module}.lua: {e}"));
+                return Err(format!("写入重命名文件失败 {new_module}: {e}"));
+            }
+        }
     }
 
     std::fs::remove_file(&zip_path).ok();
     emit("done", 100, "安装完成！");
 
-    Ok(InstallResult { merged_schemas })
+    Ok(InstallResult {
+        merged_schemas,
+        logs,
+    })
 }
 
 // ─── Android plugin ──────────────────────────────────────────────────────────
@@ -604,10 +724,8 @@ fn scoped_storage_plugin<R: tauri::Runtime>() -> tauri::plugin::TauriPlugin<R> {
         .setup(|app, api| {
             #[cfg(target_os = "android")]
             {
-                let handle = api.register_android_plugin(
-                    "ink.rea.keytao_installer",
-                    "ScopedStoragePlugin",
-                )?;
+                let handle =
+                    api.register_android_plugin("ink.rea.keytao_installer", "ScopedStoragePlugin")?;
                 app.manage(ScopedStorageHandle(handle));
             }
             Ok(())
@@ -624,7 +742,10 @@ async fn android_open_app<R: tauri::Runtime>(
     {
         app.state::<ScopedStorageHandle<R>>()
             .0
-            .run_mobile_plugin("openApp", serde_json::json!({ "packageName": package_name }))
+            .run_mobile_plugin(
+                "openApp",
+                serde_json::json!({ "packageName": package_name }),
+            )
             .map(|_: serde_json::Value| ())
             .map_err(|e| e.to_string())
     }
@@ -694,12 +815,19 @@ async fn android_read_local_schemas<R: tauri::Runtime>(
         let result: serde_json::Value = app
             .state::<ScopedStorageHandle<R>>()
             .0
-            .run_mobile_plugin("readLocalSchemas", serde_json::json!({ "treeUri": tree_uri }))
+            .run_mobile_plugin(
+                "readLocalSchemas",
+                serde_json::json!({ "treeUri": tree_uri }),
+            )
             .map_err(|e| e.to_string())?;
 
         let schemas = result["schemas"]
             .as_array()
-            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
             .unwrap_or_default();
 
         Ok(schemas)
@@ -747,10 +875,26 @@ async fn android_smart_extract<R: tauri::Runtime>(
 
         let merged_schemas = result["mergedSchemas"]
             .as_array()
-            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
             .unwrap_or_default();
 
-        Ok(InstallResult { merged_schemas })
+        let logs = result["logs"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        Ok(InstallResult {
+            merged_schemas,
+            logs,
+        })
     }
     #[cfg(not(target_os = "android"))]
     {
@@ -780,7 +924,12 @@ async fn check_installer_update(app: AppHandle) -> Result<InstallerUpdateInfo, S
     let latest = latest_tag.trim_start_matches('v').to_string();
     let release_url = json["html_url"].as_str().unwrap_or("").to_string();
     let has_update = !latest.is_empty() && latest != current;
-    Ok(InstallerUpdateInfo { current_version: current, latest_version: latest, has_update, release_url })
+    Ok(InstallerUpdateInfo {
+        current_version: current,
+        latest_version: latest,
+        has_update,
+        release_url,
+    })
 }
 
 // ─── Entry point ─────────────────────────────────────────────────────────────
@@ -808,4 +957,343 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    // ── parse_rime_lua_requires ───────────────────────────────────────────────
+
+    #[test]
+    fn test_parse_requires_basic() {
+        let content = "keytao_filter = require(\"keytao_filter\")\nfoo = require('bar')\n";
+        let r = parse_rime_lua_requires(content);
+        assert_eq!(r, vec!["keytao_filter", "bar"]);
+    }
+
+    #[test]
+    fn test_parse_requires_skips_single_line_comments() {
+        let content = "-- foo = require(\"foo\")\nreal = require(\"real\")\n";
+        let r = parse_rime_lua_requires(content);
+        assert_eq!(r, vec!["real"]);
+    }
+
+    #[test]
+    fn test_parse_requires_skips_block_comment_content() {
+        let content = "--[[\n  foo = require(\"bar\")\n--]]\nreal = require(\"real\")\n";
+        let r = parse_rime_lua_requires(content);
+        assert_eq!(r, vec!["real"]);
+    }
+
+    // ── merge_rime_lua ────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_merge_appends_unique_local_require() {
+        let local = "my_mod = require(\"my_mod\")\n";
+        let zip = "keytao_filter = require(\"keytao_filter\")\n";
+        let (merged, renames) = merge_rime_lua(local, zip, &HashSet::new());
+        assert!(merged.contains("require(\"keytao_filter\")"));
+        assert!(merged.contains("require(\"my_mod\")"));
+        assert!(renames.is_empty());
+    }
+
+    #[test]
+    fn test_merge_skips_require_already_in_zip() {
+        let local = "keytao_filter = require(\"keytao_filter\")\n";
+        let zip = "keytao_filter = require(\"keytao_filter\")\n";
+        let (merged, _) = merge_rime_lua(local, zip, &HashSet::new());
+        assert_eq!(merged.matches("require(\"keytao_filter\")").count(), 1);
+    }
+
+    #[test]
+    fn test_merge_renames_conflicting_module() {
+        let local = "my_mod = require(\"my_mod\")\n";
+        let zip = "keytao = require(\"keytao\")\n";
+        let filenames: HashSet<String> = ["my_mod.lua".to_string()].into();
+        let (merged, renames) = merge_rime_lua(local, zip, &filenames);
+        assert_eq!(
+            renames,
+            vec![("my_mod".to_string(), "my_mod_user".to_string())]
+        );
+        assert!(merged.contains("require(\"my_mod_user\")"));
+        assert!(!merged.contains("require(\"my_mod\")"));
+    }
+
+    #[test]
+    fn test_merge_ignores_block_comment_content() {
+        // Reproduces the Android bug: block comment lines such as ``` were
+        // appended verbatim to the merged output because the loop did not
+        // track --[[ ... --]] state.
+        let local = concat!(
+            "--[[\n",
+            "librime-lua 样例\n",
+            "```\n",
+            "  engine:\n",
+            "    translators:\n",
+            "```\n",
+            "--]]\n",
+            "--[[\n",
+            "各例可使用 `require` 引入。\n",
+            "```\n",
+            "  foo = require(\"bar\")\n",
+            "```\n",
+            "--]]\n",
+            "my_mod = require(\"my_mod\")\n",
+        );
+        let zip = "keytao_filter = require(\"keytao_filter\")\n";
+        let (merged, renames) = merge_rime_lua(local, zip, &HashSet::new());
+        assert!(!merged.contains("librime-lua"), "block comment line leaked");
+        assert!(!merged.contains("engine:"), "block comment line leaked");
+        assert!(!merged.contains("```"), "block comment backticks leaked");
+        assert!(
+            !merged.contains("require(\"bar\")"),
+            "in-comment require leaked"
+        );
+        assert!(merged.contains("require(\"my_mod\")"));
+        assert!(renames.is_empty());
+    }
+
+    // ── parse_schema_list ─────────────────────────────────────────────────────
+
+    #[test]
+    fn test_parse_schema_list_basic() {
+        let content = "patch:\n  schema_list:\n    - schema: keytao_b\n    - schema: keytao_bg\n";
+        assert_eq!(parse_schema_list(content), vec!["keytao_b", "keytao_bg"]);
+    }
+
+    #[test]
+    fn test_parse_schema_list_stops_at_non_schema() {
+        let content = "patch:\n  schema_list:\n    - schema: foo\n  other_key: val\n";
+        assert_eq!(parse_schema_list(content), vec!["foo"]);
+    }
+
+    // ── merge_default_custom ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_merge_dc_preserves_user_schemas() {
+        let existing = "patch:\n  schema_list:\n    - schema: my_schema\n    - schema: another\n";
+        let zip = "patch:\n  schema_list:\n    - schema: keytao_b\n    - schema: keytao_bg\n";
+        let (merged, user) = merge_default_custom(Some(existing), zip);
+        assert!(merged.contains("- schema: my_schema"));
+        assert!(merged.contains("- schema: another"));
+        assert!(merged.contains("- schema: keytao_b"));
+        assert_eq!(user, vec!["my_schema", "another"]);
+    }
+
+    #[test]
+    fn test_merge_dc_excludes_user_keytao_schemas() {
+        let existing = "patch:\n  schema_list:\n    - schema: my_schema\n    - schema: keytao_b\n";
+        let zip = "patch:\n  schema_list:\n    - schema: keytao_b\n    - schema: keytao_bg\n";
+        let (merged, user) = merge_default_custom(Some(existing), zip);
+        assert_eq!(user, vec!["my_schema"]);
+        assert!(merged.contains("- schema: keytao_b"));
+        assert!(merged.contains("- schema: keytao_bg"));
+    }
+
+    #[test]
+    fn test_merge_dc_no_existing_file() {
+        let zip = "patch:\n  schema_list:\n    - schema: keytao_b\n";
+        let (merged, user) = merge_default_custom(None, zip);
+        assert!(user.is_empty());
+        assert!(merged.contains("- schema: keytao_b"));
+    }
+
+    // ── real keytao rime.lua ──────────────────────────────────────────────────
+
+    const KEYTAO_RIME_LUA: &str = concat!(
+        "--[[\n",
+        "librime-lua 样例\n",
+        "```\n",
+        "  engine:\n",
+        "    translators:\n",
+        "      - lua_translator@lua_function3\n",
+        "      - lua_translator@lua_function4\n",
+        "    filters:\n",
+        "      - lua_filter@lua_function1\n",
+        "      - lua_filter@lua_function2\n",
+        "```\n",
+        "其中各 `lua_function` 为在本文件所定义变量名。\n",
+        "--]]\n",
+        "\n",
+        "--[[\n",
+        "本文件的后面是若干个例子，按照由简单到复杂的顺序示例了 librime-lua 的用法。\n",
+        "每个例子都被组织在 `lua` 目录下的单独文件中，打开对应文件可看到实现和注解。\n",
+        "\n",
+        "各例可使用 `require` 引入。\n",
+        "```\n",
+        "  foo = require(\"bar\")\n",
+        "```\n",
+        "可认为是载入 `lua/bar.lua` 中的例子，并起名为 `foo`。\n",
+        "配方文件中的引用方法为：`...@foo`。\n",
+        "--]]\n",
+        "\n",
+        "date_time_translator = require(\"date_time\")\n",
+        "\n",
+        "\n",
+        "-- single_char_filter: 候选项重排序，使单字优先\n",
+        "-- 详见 `lua/single_char.lua`\n",
+        "-- single_char_filter = require(\"single_char\")\n",
+        "\n",
+        "\n",
+        "-- keytao_filter: 单字模式 & 630 即 ss 词组提示\n",
+        "-- 详见 `lua/keytao_filter.lua`\n",
+        "keytao_filter = require(\"keytao_filter\")\n",
+        "\n",
+        "-- 顶功处理器\n",
+        "topup_processor = require(\"for_topup\")\n",
+        "\n",
+        "-- 声笔笔简码提示 | 顶功提示 | 补全处理\n",
+        "hint_filter = require(\"for_hint\")\n",
+        "\n",
+        "-- number_translator: 将 `=` + 阿拉伯数字 翻译为大小写汉字\n",
+        "number_translator = require(\"xnumber\")\n",
+        "\n",
+        "-- 用 ' 作为次选键\n",
+        "smart_2 = require(\"smart_2\")\n",
+    );
+
+    #[test]
+    fn test_parse_requires_keytao_rime_lua() {
+        // Block comment contains `foo = require("bar")` which must NOT be included.
+        let requires = parse_rime_lua_requires(KEYTAO_RIME_LUA);
+        assert_eq!(
+            requires,
+            vec![
+                "date_time",
+                "keytao_filter",
+                "for_topup",
+                "for_hint",
+                "xnumber",
+                "smart_2"
+            ]
+        );
+        assert!(
+            !requires.contains(&"bar".to_string()),
+            "in-comment require must not be parsed"
+        );
+    }
+
+    #[test]
+    fn test_merge_reinstall_no_duplicates() {
+        // Installing over an existing identical rime.lua should produce the same file.
+        let (merged, renames) = merge_rime_lua(KEYTAO_RIME_LUA, KEYTAO_RIME_LUA, &HashSet::new());
+        assert!(renames.is_empty());
+        // Every require should appear exactly once.
+        for module in &[
+            "date_time",
+            "keytao_filter",
+            "for_topup",
+            "for_hint",
+            "xnumber",
+            "smart_2",
+        ] {
+            let needle = format!("require(\"{module}\")");
+            assert_eq!(
+                merged.matches(needle.as_str()).count(),
+                1,
+                "require(\"{module}\") duplicated after reinstall"
+            );
+        }
+    }
+
+    #[test]
+    fn test_merge_user_extra_module_appended() {
+        // User has the keytao rime.lua as local, plus one extra module.
+        let local = format!("{KEYTAO_RIME_LUA}my_custom = require(\"my_custom\")\n");
+        let (merged, renames) = merge_rime_lua(&local, KEYTAO_RIME_LUA, &HashSet::new());
+        assert!(renames.is_empty());
+        assert!(merged.contains("require(\"my_custom\")"));
+        // Keytao requires still appear exactly once.
+        assert_eq!(merged.matches("require(\"keytao_filter\")").count(), 1);
+    }
+
+    #[test]
+    fn test_merge_user_extra_module_conflict_renamed() {
+        // User has a custom `date_time.lua` that would be overwritten by zip.
+        let local = format!("{KEYTAO_RIME_LUA}my_dt = require(\"my_dt\")\n");
+        let filenames: HashSet<String> = ["my_dt.lua".to_string()].into();
+        let (merged, renames) = merge_rime_lua(&local, KEYTAO_RIME_LUA, &filenames);
+        assert_eq!(
+            renames,
+            vec![("my_dt".to_string(), "my_dt_user".to_string())]
+        );
+        assert!(merged.contains("require(\"my_dt_user\")"));
+        assert!(!merged.contains("require(\"my_dt\")"));
+    }
+
+    // ── zip overwrites local keytao content ──────────────────────────────────
+
+    #[test]
+    fn test_merge_zip_is_base_local_keytao_no_duplicates() {
+        // Local already has the same keytao rime.lua; merged must equal zip exactly.
+        let (merged, renames) = merge_rime_lua(KEYTAO_RIME_LUA, KEYTAO_RIME_LUA, &HashSet::new());
+        assert_eq!(merged, KEYTAO_RIME_LUA);
+        assert!(renames.is_empty());
+    }
+
+    #[test]
+    fn test_merge_old_keytao_missing_module_zip_provides_it() {
+        // Local = older keytao rime.lua without smart_2.
+        // Zip = new keytao rime.lua with smart_2.
+        // smart_2 must appear exactly once in merged output.
+        let old_local: String = KEYTAO_RIME_LUA
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("smart_2"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let (merged, renames) = merge_rime_lua(&old_local, KEYTAO_RIME_LUA, &HashSet::new());
+        assert_eq!(merged.matches("require(\"smart_2\")").count(), 1);
+        assert!(renames.is_empty());
+    }
+
+    #[test]
+    fn test_merge_user_extra_preserved_zip_overwrites_keytao_no_dups() {
+        // Local = keytao rime.lua + user-defined module.
+        // Zip = same keytao rime.lua (re-install / upgrade).
+        // merged must start with zip content; user module appended once;
+        // every keytao module appears exactly once.
+        let local = format!("{KEYTAO_RIME_LUA}user_plugin = require(\"user_plugin\")\n");
+        let (merged, renames) = merge_rime_lua(&local, KEYTAO_RIME_LUA, &HashSet::new());
+        assert!(merged.starts_with(KEYTAO_RIME_LUA));
+        assert!(merged.contains("require(\"user_plugin\")"));
+        for module in &[
+            "date_time",
+            "keytao_filter",
+            "for_topup",
+            "for_hint",
+            "xnumber",
+            "smart_2",
+        ] {
+            assert_eq!(
+                merged.matches(&format!("require(\"{module}\")")).count(),
+                1,
+                "require(\"{module}\") must appear exactly once"
+            );
+        }
+        assert!(renames.is_empty());
+    }
+
+    #[test]
+    fn test_merge_keytao_rime_lua_no_block_comment_leak() {
+        // Using actual keytao rime.lua as local; merged result must not contain
+        // any content from the --[[ ]] header blocks.
+        let local = KEYTAO_RIME_LUA;
+        let zip = "keytao_filter = require(\"keytao_filter\")\n";
+        let (merged, _) = merge_rime_lua(local, zip, &HashSet::new());
+        assert!(
+            !merged.contains("librime-lua"),
+            "block comment header leaked"
+        );
+        assert!(!merged.contains("engine:"), "block comment content leaked");
+        assert!(
+            !merged.contains("```"),
+            "backticks from block comment leaked"
+        );
+        assert!(
+            !merged.contains("require(\"bar\")"),
+            "in-comment require leaked"
+        );
+    }
 }

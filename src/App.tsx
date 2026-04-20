@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from "react"
 import { invoke } from "@tauri-apps/api/core"
+import { getVersion } from "@tauri-apps/api/app"
 import { listen } from "@tauri-apps/api/event"
 import { platform } from "@tauri-apps/plugin-os"
 import { Button } from "@/components/ui/button"
@@ -64,6 +65,7 @@ interface FileItem {
 
 interface InstallResult {
   merged_schemas: string[]
+  logs: string[]
 }
 
 interface RimeInfo {
@@ -217,6 +219,7 @@ function FileList({
 
 export default function App() {
   const [osType, setOsType] = useState<OSType>("unknown")
+  const [appVersion, setAppVersion] = useState<string>("")
   const [releaseInfo, setReleaseInfo] = useState<ReleaseInfo | null>(null)
   const [releaseError, setReleaseError] = useState<string | null>(null)
   const [isFetchingRelease, setIsFetchingRelease] = useState(true)
@@ -249,6 +252,7 @@ export default function App() {
       android: "android", ios: "ios",
     }
     setOsType(map[p] ?? "unknown")
+    getVersion().then(setAppVersion).catch(() => { })
 
     invoke<ReleaseInfo>("fetch_latest_release")
       .then(setReleaseInfo)
@@ -257,7 +261,7 @@ export default function App() {
 
     invoke<InstallerUpdateInfo>("check_installer_update")
       .then((info) => { if (info.has_update) setInstallerUpdate(info) })
-      .catch(() => {})
+      .catch(() => { })
 
     listen<InstallProgress>("install-progress", (e) => {
       setProgress(e.payload)
@@ -380,7 +384,9 @@ export default function App() {
         {/* Header */}
         <div className="text-center space-y-2 pb-2">
           <img src="/logo.png" alt="键道安装器" className="h-16 w-16 mx-auto" />
-          <h1 className="text-2xl font-bold tracking-tight">键道安装器</h1>
+          <h1 className="text-2xl font-bold tracking-tight">
+            键道安装器{appVersion && <span className="ml-2 text-base font-normal text-muted-foreground">v{appVersion}</span>}
+          </h1>
           <p className="text-sm text-muted-foreground">
             自动下载最新版键道输入方案并安装到 Rime 配置目录
           </p>
@@ -573,11 +579,10 @@ export default function App() {
                         key={im}
                         onClick={() => setLinuxImType(im)}
                         disabled={isInstalling}
-                        className={`px-3 py-1 text-xs rounded-md border transition-colors ${
-                          linuxImType === im
-                            ? "bg-primary text-primary-foreground border-primary"
-                            : "bg-transparent text-muted-foreground border-border hover:border-foreground/40 hover:text-foreground"
-                        }`}
+                        className={`px-3 py-1 text-xs rounded-md border transition-colors ${linuxImType === im
+                          ? "bg-primary text-primary-foreground border-primary"
+                          : "bg-transparent text-muted-foreground border-border hover:border-foreground/40 hover:text-foreground"
+                          }`}
                       >
                         {im === "fcitx5" ? "Fcitx5" : "iBus"}
                       </button>
@@ -694,6 +699,30 @@ export default function App() {
                         </span>
                       ))}
                     </p>
+                  )}
+                  {installResult && installResult.logs.length > 0 && (
+                    <details className="text-xs">
+                      <summary className="cursor-pointer text-muted-foreground hover:text-foreground select-none py-1">
+                        安装日志（{installResult.logs.length} 条）
+                      </summary>
+                      <div className="mt-1 max-h-48 overflow-y-auto rounded-md bg-muted/60 border border-border p-2 space-y-0.5">
+                        {installResult.logs.map((line, i) => (
+                          <div
+                            key={i}
+                            className={`font-mono text-[11px] leading-5 ${line.startsWith("[ERROR]")
+                              ? "text-destructive"
+                              : line.startsWith("[WARN]")
+                                ? "text-yellow-400"
+                                : line.startsWith("[MERGED]") || line.startsWith("[RENAMED]")
+                                  ? "text-primary"
+                                  : "text-muted-foreground"
+                              }`}
+                          >
+                            {line}
+                          </div>
+                        ))}
+                      </div>
+                    </details>
                   )}
                 </div>
               </DialogDescription>

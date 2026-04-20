@@ -119,6 +119,7 @@ class ScopedStoragePlugin(private val activity: Activity) : Plugin(activity) {
                     ?: return@Thread invoke.reject("Invalid directory URI")
 
                 val zipFile = File(zipPath)
+                val logs = mutableListOf<String>()
 
                 // First pass: collect default.custom.yaml, rime.lua, and lua/ filenames
                 var zipDefaultCustomPath: String? = null
@@ -183,19 +184,41 @@ class ScopedStoragePlugin(private val activity: Activity) : Plugin(activity) {
                             val filename = relative.substringAfterLast('/')
 
                             when {
-                                entry.isDirectory -> ensureDir(root, relative)
-                                isDefaultCustom(filename) && dcMergeResult != null ->
-                                    writeTextFile(root, relative, dcMergeResult.mergedContent)
-                                filename == "rime.lua" && rimeLuaMergeResult != null ->
-                                    writeTextFile(root, relative, rimeLuaMergeResult.mergedContent)
+                                entry.isDirectory -> {
+                                    try { ensureDir(root, relative) } catch (e: Exception) {
+                                        logs.add("[WARN] mkdir $relative: ${e.message}")
+                                    }
+                                }
+                                isDefaultCustom(filename) && dcMergeResult != null -> {
+                                    writeFileBytes(root, relative, dcMergeResult.mergedContent.toByteArray(), logs, merged = true)
+                                }
+                                filename == "rime.lua" && rimeLuaMergeResult != null -> {
+                                    writeFileBytes(root, relative, rimeLuaMergeResult.mergedContent.toByteArray(), logs, merged = true)
+                                }
                                 else -> {
                                     val dirPart = relative.substringBeforeLast('/', "")
-                                    val dir = if (dirPart.isEmpty()) root else ensureDir(root, dirPart)
-                                    dir.findFile(filename)?.delete()
+                                    val dir = if (dirPart.isEmpty()) root else try {
+                                        ensureDir(root, dirPart)
+                                    } catch (e: Exception) {
+                                        logs.add("[ERROR] mkdir for $relative: ${e.message}")
+                                        return@Thread invoke.reject("Failed to create directory for: $relative")
+                                    }
+                                    val deleted = dir.findFile(filename)?.delete() ?: true
+                                    if (!deleted) logs.add("[WARN] delete failed for $relative, will attempt overwrite")
                                     val newFile = dir.createFile("application/octet-stream", filename)
-                                        ?: return@Thread invoke.reject("Failed to create: $filename")
-                                    activity.contentResolver.openOutputStream(newFile.uri)?.use { out ->
+                                    if (newFile == null) {
+                                        logs.add("[ERROR] createFile failed: $relative")
+                                        return@Thread invoke.reject("Failed to create: $filename")
+                                    }
+                                    val written = activity.contentResolver.openOutputStream(newFile.uri)?.use { out ->
                                         zis.copyTo(out)
+                                        true
+                                    } ?: false
+                                    if (written) {
+                                        logs.add("[OK] $relative")
+                                    } else {
+                                        logs.add("[ERROR] openOutputStream returned null: $relative")
+                                        return@Thread invoke.reject("Failed to open output stream: $relative")
                                     }
                                 }
                             }
@@ -208,13 +231,21 @@ class ScopedStoragePlugin(private val activity: Activity) : Plugin(activity) {
 
                 // Write renamed user lua files (read before zip overwrote them)
                 if (renamedLuaFiles.isNotEmpty()) {
-                    val luaDir = ensureDir(root, "lua")
+                    val luaDir = try { ensureDir(root, "lua") } catch (e: Exception) {
+                        return@Thread invoke.reject("Failed to ensure lua dir: ${e.message}")
+                    }
                     for ((newName, bytes) in renamedLuaFiles) {
                         val filename = "$newName.lua"
                         luaDir.findFile(filename)?.delete()
                         val newFile = luaDir.createFile("application/octet-stream", filename)
-                        newFile?.let {
-                            activity.contentResolver.openOutputStream(it.uri)?.use { out -> out.write(bytes) }
+                        if (newFile == null) {
+                            logs.add("[ERROR] createFile for renamed: lua/$filename")
+                        } else {
+                            val ok = activity.contentResolver.openOutputStream(newFile.uri)?.use { out ->
+                                out.write(bytes); true
+                            } ?: false
+                            if (ok) logs.add("[RENAMED] lua/$filename")
+                            else logs.add("[ERROR] openOutputStream for renamed: lua/$filename")
                         }
                     }
                 }
@@ -224,7 +255,13 @@ class ScopedStoragePlugin(private val activity: Activity) : Plugin(activity) {
                 val mergedArray = JSONArray()
                 dcMergeResult?.userSchemas?.forEach { mergedArray.put(it) }
 
-                invoke.resolve(JSObject().apply { put("mergedSchemas", mergedArray) })
+                val logsArray = JSONArray()
+                logs.forEach { logsArray.put(it) }
+
+                invoke.resolve(JSObject().apply {
+                    put("mergedSchemas", mergedArray)
+                    put("logs", logsArray)
+                })
             } catch (ex: Exception) {
                 invoke.reject(ex.message ?: "Extraction failed")
             }
@@ -232,9 +269,6 @@ class ScopedStoragePlugin(private val activity: Activity) : Plugin(activity) {
     }
 
     // ─── Helpers ────────────────────────────────────────────────────────────────
-
-    private fun isDefaultCustom(filename: String) =
-        filename == "default.custom.yaml" || filename == "default-custom.yaml"
 
     private fun readFileFromTree(root: DocumentFile, filename: String): String? {
         return try {
@@ -246,6 +280,20 @@ class ScopedStoragePlugin(private val activity: Activity) : Plugin(activity) {
         }
     }
 
+    private fun writeFileBytes(root: DocumentFile, relativePath: String, content: ByteArray, logs: MutableList<String>, merged: Boolean = false) {
+        val dirPart = relativePath.substringBeforeLast('/', "")
+        val filename = relativePath.substringAfterLast('/')
+        val dir = if (dirPart.isEmpty()) root else ensureDir(root, dirPart)
+        dir.findFile(filename)?.delete()
+        val file = dir.createFile("application/octet-stream", filename)
+            ?: throw Exception("Failed to create: $filename")
+        val ok = activity.contentResolver.openOutputStream(file.uri)?.use {
+            it.write(content); true
+        } ?: false
+        if (!ok) throw Exception("Failed to open output stream: $filename")
+        logs.add(if (merged) "[MERGED] $relativePath" else "[OK] $relativePath")
+    }
+
     private fun writeTextFile(root: DocumentFile, relativePath: String, content: String) {
         val dirPart = relativePath.substringBeforeLast('/', "")
         val filename = relativePath.substringAfterLast('/')
@@ -253,116 +301,6 @@ class ScopedStoragePlugin(private val activity: Activity) : Plugin(activity) {
         dir.findFile(filename)?.delete()
         val file = dir.createFile("application/octet-stream", filename) ?: return
         activity.contentResolver.openOutputStream(file.uri)?.use { it.write(content.toByteArray()) }
-    }
-
-    private fun parseSchemas(content: String): List<String> {
-        val schemas = mutableListOf<String>()
-        var inList = false
-        for (line in content.lines()) {
-            val t = line.trim()
-            when {
-                t.contains("schema_list:") -> inList = true
-                inList -> {
-                    val m = Regex("^- schema:\\s*(\\S+)").find(t)
-                    if (m != null) {
-                        schemas.add(m.groupValues[1])
-                    } else if (t.isNotEmpty() && !t.startsWith('#') && !t.startsWith('-')) {
-                        inList = false
-                    }
-                }
-            }
-        }
-        return schemas
-    }
-
-    data class MergeResult(val mergedContent: String, val userSchemas: List<String>)
-
-    data class RimeLuaMergeResult(val mergedContent: String, val renames: List<Pair<String, String>>)
-
-    private fun extractLuaRequire(line: String): String? {
-        val pos = line.indexOf("require").takeIf { it >= 0 } ?: return null
-        val after = line.substring(pos + 7).trimStart()
-        if (!after.startsWith('(')) return null
-        val inner = after.substring(1).trimStart()
-        val quote = inner.firstOrNull() ?: return null
-        if (quote != '"' && quote != '\'') return null
-        val content = inner.substring(1)
-        val end = content.indexOf(quote).takeIf { it >= 0 } ?: return null
-        return content.substring(0, end)
-    }
-
-    private fun mergeRimeLua(
-        localContent: String,
-        zipContent: String,
-        zipLuaFilenames: Set<String>
-    ): RimeLuaMergeResult {
-        val zipRequires = zipContent.lines()
-            .map { it.trim() }
-            .filter { it.isNotEmpty() && !it.startsWith("--") }
-            .mapNotNull { extractLuaRequire(it) }
-            .toSet()
-
-        val renames = mutableListOf<Pair<String, String>>()
-        val extraLines = mutableListOf<String>()
-
-        for (line in localContent.lines()) {
-            val t = line.trim()
-            if (t.isEmpty() || t.startsWith("--")) continue
-            val module = extractLuaRequire(t)
-            when {
-                module == null -> extraLines.add(line)
-                module in zipRequires -> continue
-                "$module.lua" in zipLuaFilenames -> {
-                    val newName = "${module}_user"
-                    val newLine = line
-                        .replace("\"$module\"", "\"$newName\"")
-                        .replace("'$module'", "'$newName'")
-                    renames.add(module to newName)
-                    extraLines.add(newLine)
-                }
-                else -> extraLines.add(line)
-            }
-        }
-
-        val merged = buildString {
-            append(zipContent)
-            if (extraLines.isNotEmpty()) {
-                if (!zipContent.endsWith('\n')) append('\n')
-                extraLines.forEach { appendLine(it) }
-            }
-        }
-
-        return RimeLuaMergeResult(merged, renames)
-    }
-
-    private fun mergeDefaultCustom(existing: String?, zipContent: String): MergeResult {
-        val keytaoSchemas = parseSchemas(zipContent).filter { it.startsWith("keytao") }
-        val userSchemas = existing?.let { c ->
-            parseSchemas(c).filter { !it.startsWith("keytao") }
-        } ?: emptyList()
-        val allSchemas = userSchemas + keytaoSchemas
-
-        val out = StringBuilder()
-        var inList = false
-        for (line in zipContent.lines()) {
-            val t = line.trim()
-            if (!inList) {
-                out.appendLine(line)
-                if (t.contains("schema_list:")) {
-                    inList = true
-                    allSchemas.forEach { out.appendLine("    - schema: $it") }
-                }
-            } else {
-                if (Regex("^- schema:").containsMatchIn(t)) {
-                    // skip original entries
-                } else {
-                    inList = false
-                    out.appendLine(line)
-                }
-            }
-        }
-
-        return MergeResult(out.toString(), userSchemas)
     }
 
     private fun ensureDir(root: DocumentFile, path: String): DocumentFile {

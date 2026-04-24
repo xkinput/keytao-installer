@@ -40,9 +40,17 @@ pub struct FileItem {
 }
 
 #[derive(Serialize, Clone)]
+pub struct VerifyEntry {
+    pub path: String,
+    pub ok: bool,
+    pub note: String,
+}
+
+#[derive(Serialize, Clone)]
 pub struct InstallResult {
     pub merged_schemas: Vec<String>,
     pub logs: Vec<String>,
+    pub verify: Vec<VerifyEntry>,
 }
 
 fn build_client(app: &AppHandle) -> Result<reqwest::Client, String> {
@@ -433,6 +441,167 @@ fn merge_default_custom(existing: Option<&str>, zip_content: &str) -> (String, V
     (out, user)
 }
 
+/// After extraction, verify key files were written correctly.
+/// - default.custom.yaml / rime.lua: read back and compare byte-for-byte with expected content
+/// - dict / schema / lua files: just check existence
+fn verify_install(
+    dest: &std::path::Path,
+    expected_dc: Option<&str>,
+    expected_rl: Option<&str>,
+    zip_bytes: &[u8],
+) -> Vec<VerifyEntry> {
+    use std::io::Read;
+    let mut entries: Vec<VerifyEntry> = Vec::new();
+
+    // Verify default.custom.yaml content matches what we wrote
+    if let Some(expected) = expected_dc {
+        let path = dest.join("default.custom.yaml");
+        let label = "default.custom.yaml".to_string();
+        match std::fs::read_to_string(&path) {
+            Ok(actual) if actual == expected => entries.push(VerifyEntry {
+                path: label,
+                ok: true,
+                note: "内容一致".into(),
+            }),
+            Ok(_) => entries.push(VerifyEntry {
+                path: label,
+                ok: false,
+                note: "内容与写入时不符，可能被其他程序修改或写入不完整".into(),
+            }),
+            Err(e) => entries.push(VerifyEntry {
+                path: label,
+                ok: false,
+                note: format!("读取失败: {e}"),
+            }),
+        }
+    }
+
+    // Verify rime.lua content matches what we wrote
+    if let Some(expected) = expected_rl {
+        let path = dest.join("rime.lua");
+        let label = "rime.lua".to_string();
+        match std::fs::read_to_string(&path) {
+            Ok(actual) if actual == expected => entries.push(VerifyEntry {
+                path: label,
+                ok: true,
+                note: "内容一致".into(),
+            }),
+            Ok(_) => entries.push(VerifyEntry {
+                path: label,
+                ok: false,
+                note: "内容与写入时不符，可能被其他程序修改或写入不完整".into(),
+            }),
+            Err(e) => entries.push(VerifyEntry {
+                path: label,
+                ok: false,
+                note: format!("读取失败: {e}"),
+            }),
+        }
+    }
+
+    // Check that every non-empty zip entry (excluding the two merge-handled files) was written to disk
+    if let Ok(mut archive) = zip::ZipArchive::new(std::io::Cursor::new(zip_bytes)) {
+        for i in 0..archive.len() {
+            if let Ok(file) = archive.by_index(i) {
+                let raw = file.name().to_string();
+                let relative = raw
+                    .splitn(2, '/')
+                    .nth(1)
+                    .unwrap_or("")
+                    .trim_end_matches('/')
+                    .to_string();
+                if relative.is_empty() || file.is_dir() {
+                    continue;
+                }
+                let filename = relative.rsplit('/').next().unwrap_or(&relative).to_string();
+                // Only spot-check key file types (schemas, dicts, lua, opencc)
+                let is_key = filename.ends_with(".schema.yaml")
+                    || filename.ends_with(".dict.yaml")
+                    || (filename.ends_with(".lua") && !relative.contains('/'))
+                    || relative.starts_with("lua/")
+                    || relative.starts_with("opencc/");
+                if !is_key {
+                    continue;
+                }
+                // Skip merge-handled files (already verified above)
+                if is_default_custom(&filename) || filename == "rime.lua" {
+                    continue;
+                }
+                let on_disk = dest.join(&relative);
+                if on_disk.exists() {
+                    entries.push(VerifyEntry {
+                        path: relative,
+                        ok: true,
+                        note: "文件存在".into(),
+                    });
+                } else {
+                    entries.push(VerifyEntry {
+                        path: relative,
+                        ok: false,
+                        note: "文件不存在".into(),
+                    });
+                }
+            }
+        }
+    }
+    entries
+}
+
+/// Writes `content` to `path`, forcibly overwriting even read-only files.
+/// On Linux, triggers a polkit (pkexec) root-auth dialog if the file is root-owned.
+/// Returns a tag for logging: "" (normal), " [forced]", or " [root]".
+fn write_file_force(path: &std::path::Path, content: &[u8]) -> Result<&'static str, String> {
+    if let Some(p) = path.parent() {
+        std::fs::create_dir_all(p).ok();
+    }
+    if std::fs::write(path, content).is_ok() {
+        return Ok("");
+    }
+    // Try chmod before falling back to root — works when we own the file but it's read-only
+    #[cfg(unix)]
+    if path.exists() {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644));
+        if std::fs::write(path, content).is_ok() {
+            return Ok(" [forced]");
+        }
+    }
+    write_file_privileged_fallback(path, content)
+}
+
+#[cfg(target_os = "linux")]
+fn write_file_privileged_fallback(
+    path: &std::path::Path,
+    content: &[u8],
+) -> Result<&'static str, String> {
+    let tmp = std::env::temp_dir().join("keytao_privileged_write");
+    std::fs::write(&tmp, content).map_err(|e| format!("临时文件写入失败: {e}"))?;
+    let result = std::process::Command::new("pkexec")
+        .arg("cp")
+        .arg("--")
+        .arg(&tmp)
+        .arg(path)
+        .output();
+    let _ = std::fs::remove_file(&tmp);
+    match result {
+        Ok(o) if o.status.success() => Ok(" [root]"),
+        Ok(o) => Err(format!(
+            "需要 root 权限写入 {}，认证失败或被取消: {}",
+            path.display(),
+            String::from_utf8_lossy(&o.stderr).trim()
+        )),
+        Err(e) => Err(format!("无法启动 pkexec（请确认系统已安装 polkit）: {e}")),
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn write_file_privileged_fallback(
+    path: &std::path::Path,
+    _content: &[u8],
+) -> Result<&'static str, String> {
+    Err(format!("写入失败（权限不足）：{}", path.display()))
+}
+
 #[tauri::command]
 async fn download_to_temp(app: AppHandle, url: String) -> Result<String, String> {
     let emit = |stage: &str, percent: u32, message: &str| {
@@ -643,44 +812,32 @@ async fn smart_install<R: tauri::Runtime>(
         } else if Some(&relative) == merged_dc_path.as_ref() {
             if let Some(ref mc) = merged_dc_content {
                 let out = dest.join(&relative);
-                if let Some(p) = out.parent() {
-                    std::fs::create_dir_all(p).ok();
-                }
-                match std::fs::write(&out, mc.as_bytes()) {
-                    Ok(_) => logs.push(format!("[MERGED] {relative}")),
+                match write_file_force(&out, mc.as_bytes()) {
+                    Ok(tag) => logs.push(format!("[MERGED]{tag} {relative}")),
                     Err(e) => {
                         logs.push(format!("[ERROR] {relative}: {e}"));
-                        return Err(format!("写入失败 {relative}: {e}"));
+                        return Err(e);
                     }
                 }
             }
         } else if Some(&relative) == merged_rime_lua_path.as_ref() {
             if let Some(ref mc) = merged_rime_lua_content {
                 let out = dest.join(&relative);
-                if let Some(p) = out.parent() {
-                    std::fs::create_dir_all(p).ok();
-                }
-                match std::fs::write(&out, mc.as_bytes()) {
-                    Ok(_) => logs.push(format!("[MERGED] {relative}")),
+                match write_file_force(&out, mc.as_bytes()) {
+                    Ok(tag) => logs.push(format!("[MERGED]{tag} {relative}")),
                     Err(e) => {
                         logs.push(format!("[ERROR] {relative}: {e}"));
-                        return Err(format!("写入失败 {relative}: {e}"));
+                        return Err(e);
                     }
                 }
             }
         } else {
             let out = dest.join(&relative);
-            if let Some(p) = out.parent() {
-                if let Err(e) = std::fs::create_dir_all(p) {
-                    logs.push(format!("[ERROR] mkdir for {relative}: {e}"));
-                    return Err(format!("创建目录失败: {e}"));
-                }
-            }
-            match std::fs::write(&out, &content) {
-                Ok(_) => logs.push(format!("[OK] {relative}")),
+            match write_file_force(&out, &content) {
+                Ok(tag) => logs.push(format!("[OK]{tag} {relative}")),
                 Err(e) => {
                     logs.push(format!("[ERROR] {relative}: {e}"));
-                    return Err(format!("写入失败 {relative}: {e}"));
+                    return Err(e);
                 }
             }
         }
@@ -696,11 +853,11 @@ async fn smart_install<R: tauri::Runtime>(
     // Write renamed user lua files (saved before zip overwrote them)
     for (new_module, bytes) in &renamed_lua_files {
         let out = dest.join("lua").join(format!("{}.lua", new_module));
-        match std::fs::write(&out, bytes) {
-            Ok(_) => logs.push(format!("[RENAMED] lua/{new_module}.lua")),
+        match write_file_force(&out, bytes) {
+            Ok(tag) => logs.push(format!("[RENAMED]{tag} lua/{new_module}.lua")),
             Err(e) => {
                 logs.push(format!("[ERROR] rename lua/{new_module}.lua: {e}"));
-                return Err(format!("写入重命名文件失败 {new_module}: {e}"));
+                return Err(e);
             }
         }
     }
@@ -708,9 +865,17 @@ async fn smart_install<R: tauri::Runtime>(
     std::fs::remove_file(&zip_path).ok();
     emit("done", 100, "安装完成！");
 
+    let verify = verify_install(
+        &dest,
+        merged_dc_content.as_deref(),
+        merged_rime_lua_content.as_deref(),
+        &zip_bytes,
+    );
+
     Ok(InstallResult {
         merged_schemas,
         logs,
+        verify,
     })
 }
 
@@ -891,9 +1056,25 @@ async fn android_smart_extract<R: tauri::Runtime>(
             })
             .unwrap_or_default();
 
+        let verify = result["verify"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| {
+                        Some(VerifyEntry {
+                            path: v["path"].as_str()?.to_string(),
+                            ok: v["ok"].as_bool().unwrap_or(false),
+                            note: v["note"].as_str().unwrap_or("").to_string(),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
         Ok(InstallResult {
             merged_schemas,
             logs,
+            verify,
         })
     }
     #[cfg(not(target_os = "android"))]

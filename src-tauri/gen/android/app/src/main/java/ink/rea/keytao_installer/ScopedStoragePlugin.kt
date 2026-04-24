@@ -250,6 +250,52 @@ class ScopedStoragePlugin(private val activity: Activity) : Plugin(activity) {
                     }
                 }
 
+                // Verify: read back default.custom.yaml and rime.lua, check key files exist
+                val verifyArray = JSONArray()
+                fun addVerify(path: String, ok: Boolean, note: String) {
+                    verifyArray.put(JSObject().apply {
+                        put("path", path)
+                        put("ok", ok)
+                        put("note", note)
+                    })
+                }
+
+                dcMergeResult?.mergedContent?.let { expected ->
+                    val actual = readFileFromTree(root, "default.custom.yaml")
+                    if (actual == expected) addVerify("default.custom.yaml", true, "内容一致")
+                    else if (actual != null) addVerify("default.custom.yaml", false, "内容与写入时不符，可能写入不完整")
+                    else addVerify("default.custom.yaml", false, "文件不存在或无法读取")
+                }
+                rimeLuaMergeResult?.mergedContent?.let { expected ->
+                    val actual = readFileFromTree(root, "rime.lua")
+                    if (actual == expected) addVerify("rime.lua", true, "内容一致")
+                    else if (actual != null) addVerify("rime.lua", false, "内容与写入时不符，可能写入不完整")
+                    else addVerify("rime.lua", false, "文件不存在或无法读取")
+                }
+                // Spot-check key zip entries by existence in the tree (before deleting zip)
+                ZipInputStream(zipFile.inputStream().buffered()).use { zis ->
+                    var entry = zis.nextEntry
+                    while (entry != null) {
+                        val relative = entry.name.substringAfter('/').trimEnd('/')
+                        val filename = relative.substringAfterLast('/')
+                        val isKey = filename.endsWith(".schema.yaml")
+                            || filename.endsWith(".dict.yaml")
+                            || (filename.endsWith(".lua") && !relative.contains('/'))
+                            || relative.startsWith("lua/")
+                            || relative.startsWith("opencc/")
+                        if (!entry.isDirectory && isKey && !isDefaultCustom(filename) && filename != "rime.lua") {
+                            val parts = relative.split('/')
+                            var node: DocumentFile? = root
+                            for (part in parts.dropLast(1)) { node = node?.findFile(part) }
+                            val exists = node?.findFile(parts.last()) != null
+                            if (exists) addVerify(relative, true, "文件存在")
+                            else addVerify(relative, false, "文件不存在")
+                        }
+                        zis.closeEntry()
+                        entry = zis.nextEntry
+                    }
+                }
+
                 zipFile.delete()
 
                 val mergedArray = JSONArray()
@@ -261,6 +307,7 @@ class ScopedStoragePlugin(private val activity: Activity) : Plugin(activity) {
                 invoke.resolve(JSObject().apply {
                     put("mergedSchemas", mergedArray)
                     put("logs", logsArray)
+                    put("verify", verifyArray)
                 })
             } catch (ex: Exception) {
                 invoke.reject(ex.message ?: "Extraction failed")

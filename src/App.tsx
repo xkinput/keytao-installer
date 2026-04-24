@@ -63,9 +63,16 @@ interface FileItem {
   is_dir: boolean
 }
 
+interface VerifyEntry {
+  path: string
+  ok: boolean
+  note: string
+}
+
 interface InstallResult {
   merged_schemas: string[]
   logs: string[]
+  verify: VerifyEntry[]
 }
 
 interface RimeInfo {
@@ -700,6 +707,32 @@ export default function App() {
                       ))}
                     </p>
                   )}
+                  {installResult && installResult.verify.length > 0 && (() => {
+                    const failCount = installResult.verify.filter(v => !v.ok).length
+                    return (
+                      <details className="text-xs" open={failCount > 0}>
+                        <summary className="cursor-pointer select-none py-1 flex items-center gap-1.5">
+                          {failCount > 0
+                            ? <span className="text-destructive">校验失败 {failCount} 项，可能未正确安装</span>
+                            : <span className="text-green-400">校验通过（{installResult.verify.length} 项）</span>
+                          }
+                        </summary>
+                        <div className="mt-1 max-h-48 overflow-y-auto rounded-md bg-muted/60 border border-border p-2 space-y-0.5">
+                          {installResult.verify.map((entry, i) => (
+                            <div key={i} className="flex items-start gap-1.5 font-mono text-[11px] leading-5">
+                              <span className={entry.ok ? "text-green-400 shrink-0" : "text-destructive shrink-0"}>
+                                {entry.ok ? "✓" : "✗"}
+                              </span>
+                              <span className={`break-all ${entry.ok ? "text-muted-foreground" : "text-destructive"}`}>
+                                {entry.path}
+                                {!entry.ok && <span className="text-destructive/70"> — {entry.note}</span>}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      </details>
+                    )
+                  })()}
                   {installResult && installResult.logs.length > 0 && (
                     <details className="text-xs">
                       <summary className="cursor-pointer text-muted-foreground hover:text-foreground select-none py-1">
@@ -710,12 +743,16 @@ export default function App() {
                           <div
                             key={i}
                             className={`font-mono text-[11px] leading-5 ${line.startsWith("[ERROR]")
-                              ? "text-destructive"
-                              : line.startsWith("[WARN]")
-                                ? "text-yellow-400"
-                                : line.startsWith("[MERGED]") || line.startsWith("[RENAMED]")
-                                  ? "text-primary"
-                                  : "text-muted-foreground"
+                                ? "text-destructive"
+                                : line.startsWith("[WARN]")
+                                  ? "text-yellow-400"
+                                  : line.includes("[root]")
+                                    ? "text-orange-400"
+                                    : line.includes("[forced]")
+                                      ? "text-yellow-300"
+                                      : line.startsWith("[MERGED]") || line.startsWith("[RENAMED]")
+                                        ? "text-primary"
+                                        : "text-muted-foreground"
                               }`}
                           >
                             {line}

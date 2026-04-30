@@ -13,6 +13,7 @@ import app.tauri.plugin.JSObject
 import app.tauri.plugin.Plugin
 import org.json.JSONArray
 import java.io.File
+import java.util.zip.ZipFile as JZipFile
 import java.util.zip.ZipInputStream
 
 @TauriPlugin
@@ -121,194 +122,190 @@ class ScopedStoragePlugin(private val activity: Activity) : Plugin(activity) {
                 val zipFile = File(zipPath)
                 val logs = mutableListOf<String>()
 
-                // First pass: collect default.custom.yaml, rime.lua, and lua/ filenames
-                var zipDefaultCustomPath: String? = null
-                var zipDefaultCustomContent: String? = null
-                var zipRimeLuaPath: String? = null
-                var zipRimeLuaContent: String? = null
-                val zipLuaFilenames = mutableSetOf<String>()
+                // Directory cache: avoids repeated findFile IPC calls for the same path
+                val dirCache = mutableMapOf<String, DocumentFile>()
+                fun getOrCreateDir(path: String): DocumentFile {
+                    if (path.isEmpty()) return root
+                    dirCache[path]?.let { return it }
+                    val parts = path.split('/')
+                    var current = root
+                    val sb = StringBuilder()
+                    for (part in parts) {
+                        if (part.isEmpty()) continue
+                        if (sb.isNotEmpty()) sb.append('/')
+                        sb.append(part)
+                        val key = sb.toString()
+                        current = dirCache[key] ?: run {
+                            val dir = current.findFile(part)?.takeIf { it.isDirectory }
+                                ?: current.createDirectory(part)
+                                ?: throw Exception("Failed to create directory: $part")
+                            dirCache[key] = dir
+                            dir
+                        }
+                    }
+                    return current
+                }
 
-                ZipInputStream(zipFile.inputStream().buffered()).use { zis ->
-                    var entry = zis.nextEntry
-                    while (entry != null) {
-                        val relative = entry.name.substringAfter('/').trimEnd('/')
+                fun writeToDir(dir: DocumentFile, filename: String, content: ByteArray, relative: String, merged: Boolean = false) {
+                    dir.findFile(filename)?.delete()
+                    val file = dir.createFile("application/octet-stream", filename)
+                        ?: throw Exception("Failed to create: $filename")
+                    val ok = activity.contentResolver.openOutputStream(file.uri)?.use { it.write(content); true } ?: false
+                    if (!ok) throw Exception("Failed to open output stream: $filename")
+                    logs.add(if (merged) "[MERGED] $relative" else "[OK] $relative")
+                }
+
+                JZipFile(zipFile).use { zip ->
+                    // Enumerate all entries once (metadata only, no data read)
+                    val allEntries = zip.entries().toList()
+
+                    // Collect merge candidates and lua filenames from metadata
+                    val zipLuaFilenames = mutableSetOf<String>()
+                    var dcEntry: java.util.zip.ZipEntry? = null
+                    var rimeLuaEntry: java.util.zip.ZipEntry? = null
+                    for (entry in allEntries) {
+                        val relative = entry.name.trimEnd('/')
                         val filename = relative.substringAfterLast('/')
                         when {
-                            !entry.isDirectory && isDefaultCustom(filename) && zipDefaultCustomPath == null -> {
-                                zipDefaultCustomPath = relative
-                                zipDefaultCustomContent = zis.bufferedReader().readText()
-                            }
-                            !entry.isDirectory && filename == "rime.lua" && !relative.contains('/') && zipRimeLuaPath == null -> {
-                                zipRimeLuaPath = relative
-                                zipRimeLuaContent = zis.bufferedReader().readText()
-                            }
-                            !entry.isDirectory && relative.startsWith("lua/") && !relative.substring(4).contains('/') -> {
-                                zipLuaFilenames.add(filename)
-                            }
-                        }
-                        zis.closeEntry()
-                        entry = zis.nextEntry
-                    }
-                }
-
-                // Compute default.custom.yaml merge
-                val dcMergeResult = zipDefaultCustomContent?.let {
-                    val existing = readFileFromTree(root, "default.custom.yaml")
-                        ?: readFileFromTree(root, "default-custom.yaml")
-                    mergeDefaultCustom(existing, it)
-                }
-
-                // Compute rime.lua merge and save conflicting user lua files before zip overwrites them
-                val rimeLuaMergeResult = zipRimeLuaContent?.let { zipRl ->
-                    val localRl = readFileFromTree(root, "rime.lua")
-                    if (localRl != null) mergeRimeLua(localRl, zipRl, zipLuaFilenames)
-                    else RimeLuaMergeResult(zipRl, emptyList())
-                }
-
-                val renamedLuaFiles: List<Pair<String, ByteArray>> =
-                    rimeLuaMergeResult?.renames?.mapNotNull { (oldName, newName) ->
-                        val luaDir = root.findFile("lua") ?: return@mapNotNull null
-                        val bytes = luaDir.findFile("$oldName.lua")?.uri?.let { fileUri ->
-                            activity.contentResolver.openInputStream(fileUri)?.use { it.readBytes() }
-                        } ?: return@mapNotNull null
-                        newName to bytes
-                    } ?: emptyList()
-
-                // Second pass: full extraction
-                ZipInputStream(zipFile.inputStream().buffered()).use { zis ->
-                    var entry = zis.nextEntry
-                    while (entry != null) {
-                        val relative = entry.name.substringAfter('/').trimEnd('/')
-
-                        if (relative.isNotEmpty()) {
-                            val filename = relative.substringAfterLast('/')
-
-                            when {
-                                entry.isDirectory -> {
-                                    try { ensureDir(root, relative) } catch (e: Exception) {
-                                        logs.add("[WARN] mkdir $relative: ${e.message}")
-                                    }
-                                }
-                                isDefaultCustom(filename) && dcMergeResult != null -> {
-                                    writeFileBytes(root, relative, dcMergeResult.mergedContent.toByteArray(), logs, merged = true)
-                                }
-                                filename == "rime.lua" && rimeLuaMergeResult != null -> {
-                                    writeFileBytes(root, relative, rimeLuaMergeResult.mergedContent.toByteArray(), logs, merged = true)
-                                }
-                                else -> {
-                                    val dirPart = relative.substringBeforeLast('/', "")
-                                    val dir = if (dirPart.isEmpty()) root else try {
-                                        ensureDir(root, dirPart)
-                                    } catch (e: Exception) {
-                                        logs.add("[ERROR] mkdir for $relative: ${e.message}")
-                                        return@Thread invoke.reject("Failed to create directory for: $relative")
-                                    }
-                                    val deleted = dir.findFile(filename)?.delete() ?: true
-                                    if (!deleted) logs.add("[WARN] delete failed for $relative, will attempt overwrite")
-                                    val newFile = dir.createFile("application/octet-stream", filename)
-                                    if (newFile == null) {
-                                        logs.add("[ERROR] createFile failed: $relative")
-                                        return@Thread invoke.reject("Failed to create: $filename")
-                                    }
-                                    val written = activity.contentResolver.openOutputStream(newFile.uri)?.use { out ->
-                                        zis.copyTo(out)
-                                        true
-                                    } ?: false
-                                    if (written) {
-                                        logs.add("[OK] $relative")
-                                    } else {
-                                        logs.add("[ERROR] openOutputStream returned null: $relative")
-                                        return@Thread invoke.reject("Failed to open output stream: $relative")
-                                    }
-                                }
-                            }
-                        }
-
-                        zis.closeEntry()
-                        entry = zis.nextEntry
-                    }
-                }
-
-                // Write renamed user lua files (read before zip overwrote them)
-                if (renamedLuaFiles.isNotEmpty()) {
-                    val luaDir = try { ensureDir(root, "lua") } catch (e: Exception) {
-                        return@Thread invoke.reject("Failed to ensure lua dir: ${e.message}")
-                    }
-                    for ((newName, bytes) in renamedLuaFiles) {
-                        val filename = "$newName.lua"
-                        luaDir.findFile(filename)?.delete()
-                        val newFile = luaDir.createFile("application/octet-stream", filename)
-                        if (newFile == null) {
-                            logs.add("[ERROR] createFile for renamed: lua/$filename")
-                        } else {
-                            val ok = activity.contentResolver.openOutputStream(newFile.uri)?.use { out ->
-                                out.write(bytes); true
-                            } ?: false
-                            if (ok) logs.add("[RENAMED] lua/$filename")
-                            else logs.add("[ERROR] openOutputStream for renamed: lua/$filename")
+                            !entry.isDirectory && isDefaultCustom(filename) && dcEntry == null -> dcEntry = entry
+                            !entry.isDirectory && filename == "rime.lua" && !relative.contains('/') && rimeLuaEntry == null -> rimeLuaEntry = entry
+                            !entry.isDirectory && relative.startsWith("lua/") && !relative.substring(4).contains('/') -> zipLuaFilenames.add(filename)
                         }
                     }
-                }
 
-                // Verify: read back default.custom.yaml and rime.lua, check key files exist
-                val verifyArray = JSONArray()
-                fun addVerify(path: String, ok: Boolean, note: String) {
-                    verifyArray.put(JSObject().apply {
-                        put("path", path)
-                        put("ok", ok)
-                        put("note", note)
-                    })
-                }
+                    // Read merge candidates directly by random access
+                    val zipDcContent = dcEntry?.let { zip.getInputStream(it).bufferedReader().readText() }
+                    val zipRimeLuaContent = rimeLuaEntry?.let { zip.getInputStream(it).bufferedReader().readText() }
 
-                dcMergeResult?.mergedContent?.let { expected ->
-                    val actual = readFileFromTree(root, "default.custom.yaml")
-                    if (actual == expected) addVerify("default.custom.yaml", true, "内容一致")
-                    else if (actual != null) addVerify("default.custom.yaml", false, "内容与写入时不符，可能写入不完整")
-                    else addVerify("default.custom.yaml", false, "文件不存在或无法读取")
-                }
-                rimeLuaMergeResult?.mergedContent?.let { expected ->
-                    val actual = readFileFromTree(root, "rime.lua")
-                    if (actual == expected) addVerify("rime.lua", true, "内容一致")
-                    else if (actual != null) addVerify("rime.lua", false, "内容与写入时不符，可能写入不完整")
-                    else addVerify("rime.lua", false, "文件不存在或无法读取")
-                }
-                // Spot-check key zip entries by existence in the tree (before deleting zip)
-                ZipInputStream(zipFile.inputStream().buffered()).use { zis ->
-                    var entry = zis.nextEntry
-                    while (entry != null) {
-                        val relative = entry.name.substringAfter('/').trimEnd('/')
+                    val dcMergeResult = zipDcContent?.let {
+                        val existing = readFileFromTree(root, "default.custom.yaml")
+                            ?: readFileFromTree(root, "default-custom.yaml")
+                        mergeDefaultCustom(existing, it)
+                    }
+
+                    val rimeLuaMergeResult = zipRimeLuaContent?.let { zipRl ->
+                        val localRl = readFileFromTree(root, "rime.lua")
+                        if (localRl != null) mergeRimeLua(localRl, zipRl, zipLuaFilenames)
+                        else RimeLuaMergeResult(zipRl, emptyList())
+                    }
+
+                    // Save conflicting user lua files before they get overwritten
+                    val renamedLuaFiles: List<Pair<String, ByteArray>> =
+                        rimeLuaMergeResult?.renames?.mapNotNull { (oldName, newName) ->
+                            val luaDir = root.findFile("lua") ?: return@mapNotNull null
+                            val bytes = luaDir.findFile("$oldName.lua")?.uri?.let { fileUri ->
+                                activity.contentResolver.openInputStream(fileUri)?.use { it.readBytes() }
+                            } ?: return@mapNotNull null
+                            newName to bytes
+                        } ?: emptyList()
+
+                    // Single extraction pass using cached dirs
+                    for (entry in allEntries) {
+                        val relative = entry.name.trimEnd('/')
+                        if (relative.isEmpty()) continue
+                        val filename = relative.substringAfterLast('/')
+                        val dirPart = relative.substringBeforeLast('/', "")
+
+                        when {
+                            entry.isDirectory -> {
+                                try { getOrCreateDir(relative) } catch (e: Exception) {
+                                    logs.add("[WARN] mkdir $relative: ${e.message}")
+                                }
+                            }
+                            isDefaultCustom(filename) && dcMergeResult != null -> {
+                                val dir = getOrCreateDir(dirPart)
+                                try { writeToDir(dir, filename, dcMergeResult.mergedContent.toByteArray(), relative, merged = true) }
+                                catch (e: Exception) { return@Thread invoke.reject(e.message ?: "Write failed: $relative") }
+                            }
+                            filename == "rime.lua" && !relative.contains('/') && rimeLuaMergeResult != null -> {
+                                val dir = getOrCreateDir(dirPart)
+                                try { writeToDir(dir, filename, rimeLuaMergeResult.mergedContent.toByteArray(), relative, merged = true) }
+                                catch (e: Exception) { return@Thread invoke.reject(e.message ?: "Write failed: $relative") }
+                            }
+                            else -> {
+                                val dir = try { getOrCreateDir(dirPart) } catch (e: Exception) {
+                                    logs.add("[ERROR] mkdir for $relative: ${e.message}")
+                                    return@Thread invoke.reject("Failed to create directory for: $relative")
+                                }
+                                dir.findFile(filename)?.delete()
+                                val newFile = dir.createFile("application/octet-stream", filename)
+                                    ?: run { logs.add("[ERROR] createFile: $relative"); return@Thread invoke.reject("Failed to create: $filename") }
+                                val ok = activity.contentResolver.openOutputStream(newFile.uri)?.use { out ->
+                                    zip.getInputStream(entry).copyTo(out); true
+                                } ?: false
+                                if (ok) logs.add("[OK] $relative")
+                                else { logs.add("[ERROR] openOutputStream: $relative"); return@Thread invoke.reject("Failed to open output stream: $relative") }
+                            }
+                        }
+                    }
+
+                    // Write renamed user lua files
+                    if (renamedLuaFiles.isNotEmpty()) {
+                        val luaDir = try { getOrCreateDir("lua") } catch (e: Exception) {
+                            return@Thread invoke.reject("Failed to ensure lua dir: ${e.message}")
+                        }
+                        for ((newName, bytes) in renamedLuaFiles) {
+                            val fname = "$newName.lua"
+                            luaDir.findFile(fname)?.delete()
+                            val newFile = luaDir.createFile("application/octet-stream", fname)
+                            if (newFile == null) logs.add("[ERROR] createFile for renamed: lua/$fname")
+                            else {
+                                val ok = activity.contentResolver.openOutputStream(newFile.uri)?.use { it.write(bytes); true } ?: false
+                                if (ok) logs.add("[RENAMED] lua/$fname")
+                                else logs.add("[ERROR] openOutputStream for renamed: lua/$fname")
+                            }
+                        }
+                    }
+
+                    // Verify
+                    val verifyArray = JSONArray()
+                    fun addVerify(path: String, ok: Boolean, note: String) {
+                        verifyArray.put(JSObject().apply { put("path", path); put("ok", ok); put("note", note) })
+                    }
+
+                    dcMergeResult?.mergedContent?.let { expected ->
+                        val actual = readFileFromTree(root, "default.custom.yaml")
+                        if (actual == expected) addVerify("default.custom.yaml", true, "内容一致")
+                        else if (actual != null) addVerify("default.custom.yaml", false, "内容与写入时不符，可能写入不完整")
+                        else addVerify("default.custom.yaml", false, "文件不存在或无法读取")
+                    }
+                    rimeLuaMergeResult?.mergedContent?.let { expected ->
+                        val actual = readFileFromTree(root, "rime.lua")
+                        if (actual == expected) addVerify("rime.lua", true, "内容一致")
+                        else if (actual != null) addVerify("rime.lua", false, "内容与写入时不符，可能写入不完整")
+                        else addVerify("rime.lua", false, "文件不存在或无法读取")
+                    }
+                    // Spot-check key files using cached dirs (no additional ZIP pass)
+                    for (entry in allEntries) {
+                        if (entry.isDirectory) continue
+                        val relative = entry.name.trimEnd('/')
                         val filename = relative.substringAfterLast('/')
                         val isKey = filename.endsWith(".schema.yaml")
                             || filename.endsWith(".dict.yaml")
                             || (filename.endsWith(".lua") && !relative.contains('/'))
                             || relative.startsWith("lua/")
                             || relative.startsWith("opencc/")
-                        if (!entry.isDirectory && isKey && !isDefaultCustom(filename) && filename != "rime.lua") {
-                            val parts = relative.split('/')
-                            var node: DocumentFile? = root
-                            for (part in parts.dropLast(1)) { node = node?.findFile(part) }
-                            val exists = node?.findFile(parts.last()) != null
-                            if (exists) addVerify(relative, true, "文件存在")
-                            else addVerify(relative, false, "文件不存在")
-                        }
-                        zis.closeEntry()
-                        entry = zis.nextEntry
+                        if (!isKey || isDefaultCustom(filename) || filename == "rime.lua") continue
+                        val dirPart = relative.substringBeforeLast('/', "")
+                        val dir = if (dirPart.isEmpty()) root else dirCache[dirPart]
+                        val exists = dir?.findFile(filename) != null
+                        if (exists) addVerify(relative, true, "文件存在")
+                        else addVerify(relative, false, "文件不存在")
                     }
+
+                    zipFile.delete()
+
+                    val mergedArray = JSONArray()
+                    dcMergeResult?.userSchemas?.forEach { mergedArray.put(it) }
+                    val logsArray = JSONArray()
+                    logs.forEach { logsArray.put(it) }
+
+                    invoke.resolve(JSObject().apply {
+                        put("mergedSchemas", mergedArray)
+                        put("logs", logsArray)
+                        put("verify", verifyArray)
+                    })
                 }
-
-                zipFile.delete()
-
-                val mergedArray = JSONArray()
-                dcMergeResult?.userSchemas?.forEach { mergedArray.put(it) }
-
-                val logsArray = JSONArray()
-                logs.forEach { logsArray.put(it) }
-
-                invoke.resolve(JSObject().apply {
-                    put("mergedSchemas", mergedArray)
-                    put("logs", logsArray)
-                    put("verify", verifyArray)
-                })
             } catch (ex: Exception) {
                 invoke.reject(ex.message ?: "Extraction failed")
             }

@@ -23,6 +23,7 @@ pub struct ReleaseInfo {
     pub version: String,
     pub name: String,
     pub published_at: String,
+    pub body: String,
     pub download_urls: DownloadUrls,
 }
 
@@ -124,6 +125,7 @@ async fn fetch_latest_release(app: AppHandle) -> Result<ReleaseInfo, String> {
         .to_string();
     let name = release["name"].as_str().unwrap_or("").to_string();
     let published_at = release["published_at"].as_str().unwrap_or("").to_string();
+    let body = release["body"].as_str().unwrap_or("").to_string();
 
     let mut urls = DownloadUrls {
         macos: None,
@@ -158,6 +160,7 @@ async fn fetch_latest_release(app: AppHandle) -> Result<ReleaseInfo, String> {
         version,
         name,
         published_at,
+        body,
         download_urls: urls,
     };
 
@@ -504,12 +507,7 @@ fn verify_install(
         for i in 0..archive.len() {
             if let Ok(file) = archive.by_index(i) {
                 let raw = file.name().to_string();
-                let relative = raw
-                    .splitn(2, '/')
-                    .nth(1)
-                    .unwrap_or("")
-                    .trim_end_matches('/')
-                    .to_string();
+                let relative = raw.trim_end_matches('/').to_string();
                 if relative.is_empty() || file.is_dir() {
                     continue;
                 }
@@ -710,12 +708,7 @@ async fn smart_install<R: tauri::Runtime>(
         for i in 0..archive.len() {
             let mut file = archive.by_index(i).map_err(|e| e.to_string())?;
             let raw = file.name().to_string();
-            let relative = raw
-                .splitn(2, '/')
-                .nth(1)
-                .unwrap_or("")
-                .trim_end_matches('/')
-                .to_string();
+            let relative = raw.trim_end_matches('/').to_string();
             if relative.is_empty() || file.is_dir() {
                 continue;
             }
@@ -787,12 +780,7 @@ async fn smart_install<R: tauri::Runtime>(
         let (relative, is_dir, content) = {
             let mut file = archive.by_index(i).map_err(|e| e.to_string())?;
             let raw = file.name().to_string();
-            let relative = raw
-                .splitn(2, '/')
-                .nth(1)
-                .unwrap_or("")
-                .trim_end_matches('/')
-                .to_string();
+            let relative = raw.trim_end_matches('/').to_string();
             if relative.is_empty() {
                 continue;
             }

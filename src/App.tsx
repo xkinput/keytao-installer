@@ -44,6 +44,7 @@ interface ReleaseInfo {
   version: string
   name: string
   published_at: string
+  body: string
   download_urls: {
     macos?: string
     windows?: string
@@ -249,6 +250,7 @@ export default function App() {
   const [isInstalling, setIsInstalling] = useState(false)
   const [installResult, setInstallResult] = useState<InstallResult | null>(null)
   const [installError, setInstallError] = useState<string | null>(null)
+  const [showChangelog, setShowChangelog] = useState(false)
 
   const unlistenRef = useRef<(() => void) | null>(null)
 
@@ -521,6 +523,15 @@ export default function App() {
                     {releaseInfo.version}
                   </Badge>
                 )}
+                {releaseInfo?.body && (
+                  <button
+                    onClick={() => setShowChangelog(true)}
+                    className="text-xs text-muted-foreground hover:text-foreground transition-colors underline underline-offset-2"
+                    title="查看更新内容"
+                  >
+                    更新内容
+                  </button>
+                )}
                 {isFetchingRelease ? (
                   <RefreshCw className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
                 ) : (
@@ -684,6 +695,27 @@ export default function App() {
           </CardContent>
         </Card>
 
+        <Dialog open={showChangelog} onOpenChange={setShowChangelog}>
+          <DialogContent className="max-w-sm">
+            <DialogHeader>
+              <DialogTitle className="flex items-center gap-2">
+                <FileText className="h-4 w-4" />
+                {releaseInfo?.name || releaseInfo?.version} 更新内容
+              </DialogTitle>
+              <DialogDescription asChild>
+                <div className="mt-2 max-h-96 overflow-y-auto">
+                  <pre className="text-xs text-foreground/80 whitespace-pre-wrap font-sans leading-relaxed">
+                    {releaseInfo?.body}
+                  </pre>
+                </div>
+              </DialogDescription>
+            </DialogHeader>
+            <Button onClick={() => setShowChangelog(false)} className="w-full mt-2">
+              关闭
+            </Button>
+          </DialogContent>
+        </Dialog>
+
         <Dialog open={!!installResult} onOpenChange={(open) => { if (!open) setInstallResult(null) }}>
           <DialogContent className="max-w-sm">
             <DialogHeader>
@@ -743,16 +775,16 @@ export default function App() {
                           <div
                             key={i}
                             className={`font-mono text-[11px] leading-5 ${line.startsWith("[ERROR]")
-                                ? "text-destructive"
-                                : line.startsWith("[WARN]")
-                                  ? "text-yellow-400"
-                                  : line.includes("[root]")
-                                    ? "text-orange-400"
-                                    : line.includes("[forced]")
-                                      ? "text-yellow-300"
-                                      : line.startsWith("[MERGED]") || line.startsWith("[RENAMED]")
-                                        ? "text-primary"
-                                        : "text-muted-foreground"
+                              ? "text-destructive"
+                              : line.startsWith("[WARN]")
+                                ? "text-yellow-400"
+                                : line.includes("[root]")
+                                  ? "text-orange-400"
+                                  : line.includes("[forced]")
+                                    ? "text-yellow-300"
+                                    : line.startsWith("[MERGED]") || line.startsWith("[RENAMED]")
+                                      ? "text-primary"
+                                      : "text-muted-foreground"
                               }`}
                           >
                             {line}

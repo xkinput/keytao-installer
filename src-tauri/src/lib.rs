@@ -19,12 +19,19 @@ pub struct DownloadUrls {
 }
 
 #[derive(Serialize, Deserialize, Clone)]
+pub struct PlatformRelease {
+    pub version: String,
+    pub download_urls: DownloadUrls,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
 pub struct ReleaseInfo {
     pub version: String,
     pub name: String,
     pub published_at: String,
     pub body: String,
-    pub download_urls: DownloadUrls,
+    pub github: Option<PlatformRelease>,
+    pub gitee: Option<PlatformRelease>,
 }
 
 #[derive(Serialize, Clone)]
@@ -54,12 +61,24 @@ pub struct InstallResult {
     pub verify: Vec<VerifyEntry>,
 }
 
+const API_BASE: &str = "https://keytao.rea.ink";
+
 fn build_client(app: &AppHandle) -> Result<reqwest::Client, String> {
     let version = app.package_info().version.to_string();
     reqwest::Client::builder()
         .user_agent(format!("keytao-installer/{version}"))
         .build()
         .map_err(|e| e.to_string())
+}
+
+fn parse_download_urls(obj: &serde_json::Value) -> DownloadUrls {
+    let urls = &obj["downloadUrls"];
+    DownloadUrls {
+        macos: urls["macos"].as_str().map(|s| s.to_string()),
+        windows: urls["windows"].as_str().map(|s| s.to_string()),
+        linux: urls["linux"].as_str().map(|s| s.to_string()),
+        android: urls["android"].as_str().map(|s| s.to_string()),
+    }
 }
 
 #[tauri::command]
@@ -76,100 +95,79 @@ async fn fetch_latest_release(app: AppHandle) -> Result<ReleaseInfo, String> {
         .unwrap_or_default()
         .as_secs();
 
+    // Check disk cache (5 min TTL, no ETag for our proxy API)
     let cached: Option<ReleaseCache> = cache_path.as_ref().and_then(|p| {
         std::fs::read_to_string(p)
             .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
+            .and_then(|s| serde_json::from_str::<ReleaseCache>(&s).ok())
     });
+    if let Some(ref c) = cached {
+        if now.saturating_sub(c.cached_at) < 300 {
+            return Ok(c.release.clone());
+        }
+    }
 
     let client = build_client(&app)?;
-    let mut req = client.get("https://api.github.com/repos/xkinput/KeyTao/releases/latest");
-    if let Some(ref c) = cached {
-        req = req.header("If-None-Match", &c.etag);
-    }
+    let url = format!("{API_BASE}/api/install/latest-release");
 
-    let response = req.send().await.map_err(|e| format!("网络请求失败: {e}"))?;
-
-    if response.status() == 304 {
-        return Ok(cached.unwrap().release);
-    }
+    let response = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| format!("网络请求失败: {e}"))?;
 
     if !response.status().is_success() {
-        let status = response.status();
-        let body: serde_json::Value = response.json().await.unwrap_or_default();
-        let msg = body["message"].as_str().unwrap_or("");
-        if msg.contains("rate limit") {
-            if let Some(c) = cached {
-                return Ok(c.release);
-            }
-            return Err("GitHub API 请求频率超限，请稍后再试".to_string());
+        if let Some(c) = cached {
+            return Ok(c.release);
         }
-        return Err(format!("获取版本信息失败，HTTP {status}: {msg}"));
+        return Err(format!("获取版本信息失败，HTTP {}", response.status()));
     }
 
-    let etag = response
-        .headers()
-        .get("etag")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("")
-        .to_string();
-
-    let release: serde_json::Value = response
+    let data: serde_json::Value = response
         .json()
         .await
         .map_err(|e| format!("解析响应失败: {e}"))?;
 
-    let version = release["tag_name"]
-        .as_str()
-        .unwrap_or("unknown")
-        .to_string();
-    let name = release["name"].as_str().unwrap_or("").to_string();
-    let published_at = release["published_at"].as_str().unwrap_or("").to_string();
-    let body = release["body"].as_str().unwrap_or("").to_string();
-
-    let mut urls = DownloadUrls {
-        macos: None,
-        windows: None,
-        linux: None,
-        android: None,
+    let github_version = data["github"]["version"].as_str().unwrap_or("").to_string();
+    let github = if !github_version.is_empty() {
+        Some(PlatformRelease {
+            version: github_version.clone(),
+            download_urls: parse_download_urls(&data["github"]),
+        })
+    } else {
+        None
     };
 
-    if let Some(assets) = release["assets"].as_array() {
-        for asset in assets {
-            let asset_name = asset["name"].as_str().unwrap_or("").to_lowercase();
-            let url = match asset["browser_download_url"].as_str() {
-                Some(u) => u.to_string(),
-                None => continue,
-            };
-            if !asset_name.ends_with(".zip") {
-                continue;
-            }
-            if asset_name.contains("mac") || asset_name.contains("macos") {
-                urls.macos = Some(url);
-            } else if asset_name.contains("win") || asset_name.contains("windows") {
-                urls.windows = Some(url);
-            } else if asset_name.contains("android") || asset_name.contains("trime") {
-                urls.android = Some(url);
-            } else if asset_name.contains("linux") {
-                urls.linux = Some(url);
-            }
-        }
-    }
+    let gitee_version = data["gitee"]["version"].as_str().unwrap_or("").to_string();
+    let gitee = if !gitee_version.is_empty() {
+        Some(PlatformRelease {
+            version: gitee_version,
+            download_urls: parse_download_urls(&data["gitee"]),
+        })
+    } else {
+        None
+    };
+
+    let version = data["version"].as_str().unwrap_or("unknown").to_string();
+    let name = data["name"].as_str().unwrap_or("").to_string();
+    let published_at = data["publishedAt"].as_str().unwrap_or("").to_string();
+    let body = data["body"].as_str().unwrap_or("").to_string();
 
     let info = ReleaseInfo {
         version,
         name,
         published_at,
         body,
-        download_urls: urls,
+        github,
+        gitee,
     };
 
-    if let (Some(path), false) = (cache_path, etag.is_empty()) {
+    if let Some(path) = cache_path {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir).ok();
         }
         let cache = ReleaseCache {
-            etag,
+            etag: String::new(),
             cached_at: now,
             release: info.clone(),
         };
@@ -831,10 +829,11 @@ async fn smart_install<R: tauri::Runtime>(
         }
 
         let percent = 61 + ((i + 1) * 39 / total) as u32;
+        let fname = relative.rsplit('/').next().unwrap_or(&relative);
         emit(
             "extracting",
             percent,
-            &format!("正在安装... {}/{}", i + 1, total),
+            &format!("正在安装... {}/{}: {}", i + 1, total, fname),
         );
     }
 
@@ -1008,12 +1007,44 @@ async fn android_smart_extract<R: tauri::Runtime>(
             },
         );
 
+        let app2 = app.clone();
+        let on_progress: tauri::ipc::Channel<serde_json::Value> =
+            tauri::ipc::Channel::new(move |body: tauri::ipc::InvokeResponseBody| {
+                let data: serde_json::Value = match body {
+                    tauri::ipc::InvokeResponseBody::Json(s) => {
+                        serde_json::from_str(&s).unwrap_or_default()
+                    }
+                    tauri::ipc::InvokeResponseBody::Raw(b) => {
+                        serde_json::from_slice(&b).unwrap_or_default()
+                    }
+                };
+                if let (Some(stage), Some(percent), Some(message)) = (
+                    data.get("stage").and_then(|v| v.as_str()).map(String::from),
+                    data.get("percent")
+                        .and_then(|v| v.as_u64())
+                        .map(|v| v as u32),
+                    data.get("message")
+                        .and_then(|v| v.as_str())
+                        .map(String::from),
+                ) {
+                    let _ = app2.emit(
+                        "install-progress",
+                        InstallProgress {
+                            stage,
+                            percent,
+                            message,
+                        },
+                    );
+                }
+                Ok(())
+            });
+
         let result: serde_json::Value = app
             .state::<ScopedStorageHandle<R>>()
             .0
             .run_mobile_plugin(
                 "smartExtractZip",
-                serde_json::json!({ "zipPath": zip_path, "treeUri": tree_uri }),
+                serde_json::json!({ "zipPath": zip_path, "treeUri": tree_uri, "onProgress": on_progress }),
             )
             .map_err(|e| e.to_string())?;
 

@@ -3,6 +3,7 @@ package ink.rea.keytao_installer
 import android.app.Activity
 import android.content.Intent
 import android.net.Uri
+import android.provider.DocumentsContract
 import androidx.activity.result.ActivityResult
 import androidx.documentfile.provider.DocumentFile
 import app.tauri.annotation.ActivityCallback
@@ -12,6 +13,8 @@ import app.tauri.plugin.Invoke
 import app.tauri.plugin.JSObject
 import app.tauri.plugin.Plugin
 import org.json.JSONArray
+import app.tauri.plugin.Channel
+import java.io.BufferedOutputStream
 import java.io.File
 import java.util.zip.ZipFile as JZipFile
 import java.util.zip.ZipInputStream
@@ -109,9 +112,15 @@ class ScopedStoragePlugin(private val activity: Activity) : Plugin(activity) {
 
     @Command
     fun smartExtractZip(invoke: Invoke) {
-        val args = invoke.getArgs()
-        val zipPath = args.getString("zipPath", null) ?: return invoke.reject("Missing zipPath")
-        val treeUriString = args.getString("treeUri", null) ?: return invoke.reject("Missing treeUri")
+        class ExtractArgs {
+            var zipPath: String? = null
+            var treeUri: String? = null
+            var onProgress: Channel? = null
+        }
+        val parsed = invoke.parseArgs(ExtractArgs::class.java)
+        val zipPath = parsed.zipPath ?: return invoke.reject("Missing zipPath")
+        val treeUriString = parsed.treeUri ?: return invoke.reject("Missing treeUri")
+        val onProgress = parsed.onProgress
 
         Thread {
             try {
@@ -124,6 +133,45 @@ class ScopedStoragePlugin(private val activity: Activity) : Plugin(activity) {
 
                 // Directory cache: avoids repeated findFile IPC calls for the same path
                 val dirCache = mutableMapOf<String, DocumentFile>()
+                // File URI cache: batch-load dir contents once (single ContentResolver query)
+                // instead of N individual findFile() calls — turns O(n²) IPC into O(n)
+                val fileUriCache = mutableMapOf<String, MutableMap<String, Uri>>()
+                fun getCachedFileMap(dir: DocumentFile): MutableMap<String, Uri> {
+                    return fileUriCache.getOrPut(dir.uri.toString()) {
+                        val map = mutableMapOf<String, Uri>()
+                        val docId = if (DocumentsContract.isTreeUri(dir.uri))
+                            DocumentsContract.getTreeDocumentId(dir.uri)
+                        else
+                            DocumentsContract.getDocumentId(dir.uri)
+                        val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(uri, docId)
+                        activity.contentResolver.query(
+                            childrenUri,
+                            arrayOf(
+                                DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+                                DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+                                DocumentsContract.Document.COLUMN_MIME_TYPE
+                            ), null, null, null
+                        )?.use { cursor ->
+                            while (cursor.moveToNext()) {
+                                val childDocId = cursor.getString(0) ?: continue
+                                val name = cursor.getString(1) ?: continue
+                                val mime = cursor.getString(2) ?: continue
+                                if (mime != DocumentsContract.Document.MIME_TYPE_DIR) {
+                                    map[name] = DocumentsContract.buildDocumentUriUsingTree(uri, childDocId)
+                                }
+                            }
+                        }
+                        map
+                    }
+                }
+                fun getOrCreateFileUri(dir: DocumentFile, filename: String): Uri? {
+                    val map = getCachedFileMap(dir)
+                    return map[filename] ?: run {
+                        val newUri = dir.createFile("application/octet-stream", filename)?.uri ?: return null
+                        map[filename] = newUri
+                        newUri
+                    }
+                }
                 fun getOrCreateDir(path: String): DocumentFile {
                     if (path.isEmpty()) return root
                     dirCache[path]?.let { return it }
@@ -147,10 +195,9 @@ class ScopedStoragePlugin(private val activity: Activity) : Plugin(activity) {
                 }
 
                 fun writeToDir(dir: DocumentFile, filename: String, content: ByteArray, relative: String, merged: Boolean = false) {
-                    dir.findFile(filename)?.delete()
-                    val file = dir.createFile("application/octet-stream", filename)
+                    val outUri = getOrCreateFileUri(dir, filename)
                         ?: throw Exception("Failed to create: $filename")
-                    val ok = activity.contentResolver.openOutputStream(file.uri)?.use { it.write(content); true } ?: false
+                    val ok = activity.contentResolver.openOutputStream(outUri, "w")?.use { it.write(content); true } ?: false
                     if (!ok) throw Exception("Failed to open output stream: $filename")
                     logs.add(if (merged) "[MERGED] $relative" else "[OK] $relative")
                 }
@@ -158,6 +205,18 @@ class ScopedStoragePlugin(private val activity: Activity) : Plugin(activity) {
                 JZipFile(zipFile).use { zip ->
                     // Enumerate all entries once (metadata only, no data read)
                     val allEntries = zip.entries().toList()
+                    val totalFiles = allEntries.count { !it.isDirectory }
+                    var processed = 0
+                    val emitProgress: (String) -> Unit = { fname ->
+                        if (totalFiles > 0) {
+                            val pct = (61 + processed * 38 / totalFiles).coerceAtMost(99)
+                            onProgress?.send(JSObject().apply {
+                                put("stage", "extracting")
+                                put("percent", pct)
+                                put("message", "正在安装... $processed/$totalFiles: $fname")
+                            })
+                        }
+                    }
 
                     // Collect merge candidates and lua filenames from metadata
                     val zipLuaFilenames = mutableSetOf<String>()
@@ -216,24 +275,25 @@ class ScopedStoragePlugin(private val activity: Activity) : Plugin(activity) {
                                 val dir = getOrCreateDir(dirPart)
                                 try { writeToDir(dir, filename, dcMergeResult.mergedContent.toByteArray(), relative, merged = true) }
                                 catch (e: Exception) { return@Thread invoke.reject(e.message ?: "Write failed: $relative") }
+                                processed++; emitProgress(filename)
                             }
                             filename == "rime.lua" && !relative.contains('/') && rimeLuaMergeResult != null -> {
                                 val dir = getOrCreateDir(dirPart)
                                 try { writeToDir(dir, filename, rimeLuaMergeResult.mergedContent.toByteArray(), relative, merged = true) }
                                 catch (e: Exception) { return@Thread invoke.reject(e.message ?: "Write failed: $relative") }
+                                processed++; emitProgress(filename)
                             }
                             else -> {
                                 val dir = try { getOrCreateDir(dirPart) } catch (e: Exception) {
                                     logs.add("[ERROR] mkdir for $relative: ${e.message}")
                                     return@Thread invoke.reject("Failed to create directory for: $relative")
                                 }
-                                dir.findFile(filename)?.delete()
-                                val newFile = dir.createFile("application/octet-stream", filename)
+                                val outUri = getOrCreateFileUri(dir, filename)
                                     ?: run { logs.add("[ERROR] createFile: $relative"); return@Thread invoke.reject("Failed to create: $filename") }
-                                val ok = activity.contentResolver.openOutputStream(newFile.uri)?.use { out ->
-                                    zip.getInputStream(entry).copyTo(out); true
+                                val ok = activity.contentResolver.openOutputStream(outUri, "w")?.use { rawOut ->
+                                    zip.getInputStream(entry).copyTo(BufferedOutputStream(rawOut, 65536), 65536); true
                                 } ?: false
-                                if (ok) logs.add("[OK] $relative")
+                                if (ok) { logs.add("[OK] $relative"); processed++; emitProgress(filename) }
                                 else { logs.add("[ERROR] openOutputStream: $relative"); return@Thread invoke.reject("Failed to open output stream: $relative") }
                             }
                         }
@@ -246,14 +306,13 @@ class ScopedStoragePlugin(private val activity: Activity) : Plugin(activity) {
                         }
                         for ((newName, bytes) in renamedLuaFiles) {
                             val fname = "$newName.lua"
-                            luaDir.findFile(fname)?.delete()
-                            val newFile = luaDir.createFile("application/octet-stream", fname)
-                            if (newFile == null) logs.add("[ERROR] createFile for renamed: lua/$fname")
-                            else {
-                                val ok = activity.contentResolver.openOutputStream(newFile.uri)?.use { it.write(bytes); true } ?: false
-                                if (ok) logs.add("[RENAMED] lua/$fname")
-                                else logs.add("[ERROR] openOutputStream for renamed: lua/$fname")
-                            }
+                            val existing = luaDir.findFile(fname)
+                            val outUri = if (existing != null) existing.uri
+                            else luaDir.createFile("application/octet-stream", fname)?.uri
+                            if (outUri == null) { logs.add("[ERROR] createFile for renamed: lua/$fname"); continue }
+                            val ok = activity.contentResolver.openOutputStream(outUri, "w")?.use { it.write(bytes); true } ?: false
+                            if (ok) logs.add("[RENAMED] lua/$fname")
+                            else logs.add("[ERROR] openOutputStream for renamed: lua/$fname")
                         }
                     }
 
@@ -288,7 +347,7 @@ class ScopedStoragePlugin(private val activity: Activity) : Plugin(activity) {
                         if (!isKey || isDefaultCustom(filename) || filename == "rime.lua") continue
                         val dirPart = relative.substringBeforeLast('/', "")
                         val dir = if (dirPart.isEmpty()) root else dirCache[dirPart]
-                        val exists = dir?.findFile(filename) != null
+                        val exists = dir != null && (fileUriCache[dir.uri.toString()]?.containsKey(filename) == true || dir.findFile(filename) != null)
                         if (exists) addVerify(relative, true, "文件存在")
                         else addVerify(relative, false, "文件不存在")
                     }
@@ -328,10 +387,11 @@ class ScopedStoragePlugin(private val activity: Activity) : Plugin(activity) {
         val dirPart = relativePath.substringBeforeLast('/', "")
         val filename = relativePath.substringAfterLast('/')
         val dir = if (dirPart.isEmpty()) root else ensureDir(root, dirPart)
-        dir.findFile(filename)?.delete()
-        val file = dir.createFile("application/octet-stream", filename)
+        val existing = dir.findFile(filename)
+        val outUri = if (existing != null) existing.uri
+        else dir.createFile("application/octet-stream", filename)?.uri
             ?: throw Exception("Failed to create: $filename")
-        val ok = activity.contentResolver.openOutputStream(file.uri)?.use {
+        val ok = activity.contentResolver.openOutputStream(outUri, "w")?.use {
             it.write(content); true
         } ?: false
         if (!ok) throw Exception("Failed to open output stream: $filename")
@@ -342,9 +402,10 @@ class ScopedStoragePlugin(private val activity: Activity) : Plugin(activity) {
         val dirPart = relativePath.substringBeforeLast('/', "")
         val filename = relativePath.substringAfterLast('/')
         val dir = if (dirPart.isEmpty()) root else ensureDir(root, dirPart)
-        dir.findFile(filename)?.delete()
-        val file = dir.createFile("application/octet-stream", filename) ?: return
-        activity.contentResolver.openOutputStream(file.uri)?.use { it.write(content.toByteArray()) }
+        val existing = dir.findFile(filename)
+        val outUri = if (existing != null) existing.uri
+        else dir.createFile("application/octet-stream", filename)?.uri ?: return
+        activity.contentResolver.openOutputStream(outUri, "w")?.use { it.write(content.toByteArray()) }
     }
 
     private fun ensureDir(root: DocumentFile, path: String): DocumentFile {

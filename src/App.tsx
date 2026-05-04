@@ -40,17 +40,25 @@ interface InstallerUpdateInfo {
   release_url: string
 }
 
-interface ReleaseInfo {
+type DownloadSource = "github" | "gitee"
+
+interface PlatformRelease {
   version: string
-  name: string
-  published_at: string
-  body: string
   download_urls: {
     macos?: string
     windows?: string
     linux?: string
     android?: string
   }
+}
+
+interface ReleaseInfo {
+  version: string
+  name: string
+  published_at: string
+  body: string
+  github: PlatformRelease | null
+  gitee: PlatformRelease | null
 }
 
 interface InstallProgress {
@@ -231,6 +239,7 @@ export default function App() {
   const [releaseInfo, setReleaseInfo] = useState<ReleaseInfo | null>(null)
   const [releaseError, setReleaseError] = useState<string | null>(null)
   const [isFetchingRelease, setIsFetchingRelease] = useState(true)
+  const [downloadSource, setDownloadSource] = useState<DownloadSource>("gitee")
   const [installerUpdate, setInstallerUpdate] = useState<InstallerUpdateInfo | null>(null)
 
   // Linux IM type selection
@@ -280,7 +289,8 @@ export default function App() {
   }, [])
 
   const osMeta = OS_META[osType]
-  const downloadUrl = releaseInfo?.download_urls[osType as keyof typeof releaseInfo.download_urls]
+  const activePlatform = downloadSource === "gitee" ? releaseInfo?.gitee : releaseInfo?.github
+  const downloadUrl = activePlatform?.download_urls?.[osType as keyof PlatformRelease["download_urls"]]
 
   async function loadFiles(path?: string, uri?: string) {
     setIsLoadingFiles(true)
@@ -518,7 +528,27 @@ export default function App() {
               <span className="flex items-center justify-center w-5 h-5 rounded-full bg-primary text-primary-foreground text-xs font-bold">2</span>
               安装键道方案
               <div className="ml-auto flex items-center gap-1.5">
-                {releaseInfo && (
+                {releaseInfo?.github && (
+                  <div className="flex gap-1">
+                    {(["github", "gitee"] as const).map((src) => {
+                      const p = src === "github" ? releaseInfo.github : releaseInfo.gitee
+                      if (!p) return null
+                      return (
+                        <button
+                          key={src}
+                          onClick={() => setDownloadSource(src)}
+                          className={`px-2 py-0.5 text-xs rounded border transition-colors font-mono ${downloadSource === src
+                            ? "bg-primary text-primary-foreground border-primary"
+                            : "bg-transparent text-muted-foreground border-border hover:border-foreground/40"
+                            }`}
+                        >
+                          {src === "github" ? "GitHub" : "Gitee"} {p.version}
+                        </button>
+                      )
+                    })}
+                  </div>
+                )}
+                {releaseInfo && !releaseInfo.github && (
                   <Badge variant="secondary" className="font-mono text-xs">
                     {releaseInfo.version}
                   </Badge>
@@ -562,16 +592,15 @@ export default function App() {
               <div className="flex items-start gap-2 text-sm text-yellow-400 bg-yellow-400/10 border border-yellow-400/20 rounded-lg px-3 py-2.5">
                 <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
                 <span>
-                  当前系统（{osMeta?.label}）暂无对应安装包，请前往{" "}
-                  <a
-                    href="https://github.com/xkinput/KeyTao/releases"
-                    target="_blank"
-                    rel="noreferrer"
-                    className="underline"
-                  >
-                    GitHub Releases
-                  </a>{" "}
-                  手动下载
+                  当前系统（{osMeta?.label}）在 {downloadSource === "gitee" ? "Gitee" : "GitHub"} 上暂无对应安装包
+                  {downloadSource === "gitee" && releaseInfo.github?.download_urls[osType as keyof PlatformRelease["download_urls"]] && (
+                    <button
+                      onClick={() => setDownloadSource("github")}
+                      className="ml-1 underline hover:no-underline"
+                    >
+                      切换到 GitHub
+                    </button>
+                  )}
                 </span>
               </div>
             )}

@@ -1,0 +1,6 @@
+# Use the system Clang instead of the Nix-wrapped cc.
+# The Nix cc wrapper forces SDKROOT to the Nix apple-sdk which lacks libiconv stubs,
+# causing "library not found for -liconv" linker errors.
+# /usr/bin/clang uses the Xcode CLT SDK which has the proper libiconv.tbd stubs.
+[target.aarch64-apple-darwin]
+linker = "/usr/bin/clang"

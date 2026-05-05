@@ -3,6 +3,12 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tauri::{AppHandle, Emitter, Manager};
 
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+use keytao_core;
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+mod rime;
+
 #[derive(Serialize, Deserialize, Clone)]
 struct ReleaseCache {
     etag: String,
@@ -1132,15 +1138,169 @@ async fn check_installer_update(app: AppHandle) -> Result<InstallerUpdateInfo, S
     })
 }
 
+// ─── macOS system IME management ─────────────────────────────────────────────
+
+#[derive(Serialize)]
+pub struct MacosImeStatus {
+    pub installed: bool,
+}
+
+#[cfg(target_os = "macos")]
+fn macos_ime_app_path() -> Option<std::path::PathBuf> {
+    dirs::home_dir().map(|h| h.join("Library/Input Methods/KeyTao.app"))
+}
+
+/// Check whether the KeyTao.app input method is installed.
+#[tauri::command]
+fn macos_ime_status() -> MacosImeStatus {
+    #[cfg(target_os = "macos")]
+    {
+        let installed = macos_ime_app_path().map(|p| p.exists()).unwrap_or(false);
+        MacosImeStatus { installed }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        MacosImeStatus { installed: false }
+    }
+}
+
+/// Copy KeyTao.app from Tauri resources to ~/Library/Input Methods/
+/// and open System Settings → Input Sources so the user can enable it.
+#[tauri::command]
+#[cfg(target_os = "macos")]
+async fn macos_install_ime(app: AppHandle) -> Result<(), String> {
+    let resource_dir = app.path().resource_dir().map_err(|e| e.to_string())?;
+    let src = resource_dir.join("KeyTao.app");
+
+    if !src.exists() {
+        return Err(
+            "IME bundle (KeyTao.app) not found in resources — run `crates/keytao-macos-ime/build.sh` first and rebuild the installer".into(),
+        );
+    }
+
+    let dst = macos_ime_app_path().ok_or("Cannot determine home directory")?;
+    if dst.exists() {
+        std::fs::remove_dir_all(&dst).map_err(|e| format!("Remove old bundle: {e}"))?;
+    }
+    copy_dir_all(&src, &dst)?;
+
+    // Tell the OS about the new input source
+    std::process::Command::new("killall")
+        .args(["-HUP", "cfprefsd"])
+        .output()
+        .ok();
+
+    // Open Keyboard / Input Sources settings so the user can add KeyTao
+    std::process::Command::new("open")
+        .arg("x-apple.systempreferences:com.apple.preference.keyboard?InputSources")
+        .output()
+        .map_err(|e| format!("open System Settings: {e}"))?;
+
+    Ok(())
+}
+
+#[tauri::command]
+#[cfg(not(target_os = "macos"))]
+async fn macos_install_ime(_app: AppHandle) -> Result<(), String> {
+    Err("macOS only".into())
+}
+
+/// Remove KeyTao.app from ~/Library/Input Methods/.
+#[tauri::command]
+async fn macos_uninstall_ime() -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let dst = macos_ime_app_path().ok_or("Cannot determine home directory")?;
+        if dst.exists() {
+            std::fs::remove_dir_all(&dst).map_err(|e| format!("Remove: {e}"))?;
+        }
+        Ok(())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Err("macOS only".into())
+    }
+}
+
+/// Recursively copy a directory tree (src → dst).
+fn copy_dir_all(src: &std::path::Path, dst: &std::path::Path) -> Result<(), String> {
+    std::fs::create_dir_all(dst).map_err(|e| format!("mkdir {}: {e}", dst.display()))?;
+    for entry in std::fs::read_dir(src).map_err(|e| format!("readdir {}: {e}", src.display()))? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+        if src_path.is_dir() {
+            copy_dir_all(&src_path, &dst_path)?;
+        } else {
+            std::fs::copy(&src_path, &dst_path)
+                .map_err(|e| format!("copy {}: {e}", src_path.display()))?;
+        }
+    }
+    Ok(())
+}
+
+// ─── Install schemas to default keytao data dir ───────────────────────────────
+
+/// Download the given zip URL and smart-install it to `~/Library/keytao`
+/// (or the platform-equivalent). Returns the same InstallResult as smart_install.
+#[tauri::command]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+async fn rime_install_to_default(app: AppHandle, url: String) -> Result<InstallResult, String> {
+    let dest =
+        keytao_core::default_user_data_dir().ok_or("Cannot determine keytao data directory")?;
+    let dest_str = dest.to_string_lossy().into_owned();
+    std::fs::create_dir_all(&dest).map_err(|e| format!("创建目录失败: {e}"))?;
+    let temp = download_to_temp(app.clone(), url).await?;
+    smart_install(app, temp, dest_str).await
+}
+
+#[tauri::command]
+#[cfg(any(target_os = "android", target_os = "ios"))]
+async fn rime_install_to_default(_app: AppHandle, _url: String) -> Result<InstallResult, String> {
+    Err("Not supported on mobile".into())
+}
+
 // ─── Entry point ─────────────────────────────────────────────────────────────
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_os::init())
-        .plugin(scoped_storage_plugin())
+        .plugin(scoped_storage_plugin());
+
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    let builder = builder
+        .plugin(tauri_plugin_global_shortcut::Builder::default().build())
+        .manage(rime::RimeEngine::default())
+        .setup(|app| {
+            use tauri_plugin_global_shortcut::{
+                Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState,
+            };
+            let shortcut = Shortcut::new(Some(Modifiers::CONTROL | Modifiers::SHIFT), Code::Space);
+            let handle = app.handle().clone();
+            app.handle()
+                .global_shortcut()
+                .on_shortcut(shortcut, move |_app, _sc, event| {
+                    if event.state() == ShortcutState::Pressed {
+                        let pid = rime::get_frontmost_pid();
+                        rime::set_injection_target(pid);
+                        if let Some(w) = handle.get_webview_window("ime-overlay") {
+                            if w.is_visible().unwrap_or(false) {
+                                let _ = w.hide();
+                            } else {
+                                let _ = w.center();
+                                let _ = w.show();
+                                let _ = w.set_focus();
+                            }
+                        }
+                    }
+                })?;
+            Ok(())
+        });
+
+    builder
         .invoke_handler(tauri::generate_handler![
             check_installer_update,
             fetch_latest_release,
@@ -1149,11 +1309,36 @@ pub fn run() {
             list_dir,
             read_local_schemas,
             smart_install,
+            macos_ime_status,
+            macos_install_ime,
+            macos_uninstall_ime,
+            rime_install_to_default,
             android_open_app,
             android_pick_directory,
             android_list_files,
             android_read_local_schemas,
             android_smart_extract,
+            // ── IME engine commands (desktop only) ──
+            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            rime::rime_setup,
+            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            rime::rime_process_key,
+            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            rime::rime_select_candidate,
+            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            rime::rime_change_page,
+            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            rime::rime_reset,
+            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            rime::rime_is_ready,
+            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            rime::rime_memory_usage,
+            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            rime::rime_inject_text,
+            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            rime::rime_get_data_dir,
+            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            rime::rime_has_schemas,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

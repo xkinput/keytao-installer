@@ -15,6 +15,18 @@
         "title": "键道安装器",
         "width": 800,
         "height": 700
+      },
+      {
+        "label": "ime-overlay",
+        "title": "KeyTao IME",
+        "width": 600,
+        "height": 220,
+        "alwaysOnTop": true,
+        "transparent": true,
+        "decorations": false,
+        "visible": false,
+        "resizable": false,
+        "skipTaskbar": true
       }
     ],
     "security": {
@@ -23,7 +35,12 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["dmg", "nsis", "deb", "appimage"],
+    "targets": [
+      "dmg",
+      "nsis",
+      "deb",
+      "appimage"
+    ],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

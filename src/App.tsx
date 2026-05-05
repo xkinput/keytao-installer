@@ -7,7 +7,6 @@ import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Progress } from "@/components/ui/progress"
 import { Badge } from "@/components/ui/badge"
-import { Separator } from "@/components/ui/separator"
 import {
   Dialog,
   DialogContent,
@@ -20,16 +19,18 @@ import {
   Download,
   CheckCircle2,
   AlertTriangle,
-  Terminal,
-  Smartphone,
-  Monitor,
-  Apple,
   ExternalLink,
   RefreshCw,
   FileText,
   Folder,
   Info,
+  Keyboard,
+  ChevronDown,
+  ChevronUp,
+  Settings,
+  Cpu,
 } from "lucide-react"
+import { ImePanel } from "@/components/ImePanel"
 
 type OSType = "windows" | "macos" | "linux" | "android" | "ios" | "unknown"
 
@@ -82,94 +83,6 @@ interface InstallResult {
   merged_schemas: string[]
   logs: string[]
   verify: VerifyEntry[]
-}
-
-interface RimeInfo {
-  name: string
-  url: string
-  configPath: string
-  commands?: string[]
-  note?: string
-  nixosNote?: string
-  nixosUrl?: string
-  appPackage?: string
-}
-
-const OS_META: Record<string, { label: string; icon: React.ReactNode; rime: RimeInfo }> = {
-  macos: {
-    label: "macOS",
-    icon: <Apple className="h-4 w-4" />,
-    rime: {
-      name: "鼠须管（Squirrel）",
-      url: "https://rime.im/download/#macOS",
-      configPath: "~/Library/Rime",
-      commands: ["brew install --cask squirrel"],
-    },
-  },
-  windows: {
-    label: "Windows",
-    icon: <Monitor className="h-4 w-4" />,
-    rime: {
-      name: "小狼毫（Weasel）",
-      url: "https://rime.im/download/#Windows",
-      configPath: "%APPDATA%\\Rime",
-      note: "从官网下载 exe 安装包",
-    },
-  },
-  linux: {
-    label: "Linux",
-    icon: <Terminal className="h-4 w-4" />,
-    rime: {
-      name: "Fcitx5-Rime / iBus-Rime",
-      url: "https://rime.im/download/#Linux",
-      configPath: "~/.local/share/fcitx5/rime  或  ~/.config/ibus/rime",
-      commands: [
-        "sudo apt install fcitx5-rime        # Ubuntu/Debian",
-        "sudo pacman -S fcitx5-rime          # Arch",
-        "sudo dnf install fcitx5-rime        # Fedora",
-      ],
-      nixosNote: "NixOS 用户请参考专用安装文档",
-      nixosUrl: "https://github.com/xkinput/KeyTao/blob/master/INSTALL_NIXOS.md",
-    },
-  },
-  android: {
-    label: "Android",
-    icon: <Smartphone className="h-4 w-4" />,
-    rime: {
-      name: "同文输入法（Trime）",
-      url: "https://github.com/osfans/trime/releases",
-      configPath: "/sdcard/rime",
-      note: "从 GitHub Releases 下载 APK，或通过 F-Droid 安装",
-      appPackage: "com.osfans.trime",
-    },
-  },
-  ios: {
-    label: "iOS",
-    icon: <Apple className="h-4 w-4" />,
-    rime: {
-      name: "iRime",
-      url: "https://apps.apple.com/app/irime/id1142623977",
-      configPath: "通过 iCloud 或文件共享导入",
-      note: "App Store 搜索 iRime",
-    },
-  },
-}
-
-function InfoRow({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <div className="flex items-start gap-3 py-2">
-      <span className="text-muted-foreground text-xs min-w-24 pt-0.5 shrink-0">{label}</span>
-      <div className="text-sm min-w-0 flex-1">{children}</div>
-    </div>
-  )
-}
-
-function CodeBlock({ children }: { children: string }) {
-  return (
-    <code className="block text-xs font-mono bg-muted/60 text-muted-foreground px-3 py-1.5 rounded-md">
-      {children}
-    </code>
-  )
 }
 
 function safUriToDisplayPath(uri: string): string {
@@ -234,6 +147,7 @@ function FileList({
 }
 
 export default function App() {
+  // eslint-disable-next-line react-hooks/rules-of-hooks
   const [osType, setOsType] = useState<OSType>("unknown")
   const [appVersion, setAppVersion] = useState<string>("")
   const [releaseInfo, setReleaseInfo] = useState<ReleaseInfo | null>(null)
@@ -242,19 +156,33 @@ export default function App() {
   const [downloadSource, setDownloadSource] = useState<DownloadSource>("gitee")
   const [installerUpdate, setInstallerUpdate] = useState<InstallerUpdateInfo | null>(null)
 
-  // Linux IM type selection
-  const [linuxImType, setLinuxImType] = useState<"fcitx5" | "ibus" | null>(null)
+  // macOS IME
+  const [imeInstalled, setImeInstalled] = useState(false)
+  const [isInstallingIme, setIsInstallingIme] = useState(false)
+  const [imeInstallError, setImeInstallError] = useState<string | null>(null)
 
-  // Directory selection
-  const [selectedDir, setSelectedDir] = useState<string | null>(null)   // display path
-  const [safUri, setSafUri] = useState<string | null>(null)             // Android SAF URI
+  // macOS first-run schema download (to ~/Library/keytao)
+  const [isDownloadingDefault, setIsDownloadingDefault] = useState(false)
+  const [defaultInstallResult, setDefaultInstallResult] = useState<InstallResult | null>(null)
+  const [defaultInstallError, setDefaultInstallError] = useState<string | null>(null)
+  const [defaultInstallProgress, setDefaultInstallProgress] = useState<InstallProgress | null>(null)
+
+  // Extension features (collapsed by default)
+  const [showExtensions, setShowExtensions] = useState(false)
+
+  // Default keytao data dir for this platform
+  const [defaultDir, setDefaultDir] = useState<string | null>(null)
+
+  // Directory selection (extension: install to custom dir)
+  const [selectedDir, setSelectedDir] = useState<string | null>(null)
+  const [safUri, setSafUri] = useState<string | null>(null)
 
   // File preview
   const [files, setFiles] = useState<FileItem[]>([])
   const [isLoadingFiles, setIsLoadingFiles] = useState(false)
   const [localSchemas, setLocalSchemas] = useState<string[] | null>(null)
 
-  // Install
+  // Install (extension)
   const [progress, setProgress] = useState<InstallProgress | null>(null)
   const [isInstalling, setIsInstalling] = useState(false)
   const [installResult, setInstallResult] = useState<InstallResult | null>(null)
@@ -281,14 +209,26 @@ export default function App() {
       .then((info) => { if (info.has_update) setInstallerUpdate(info) })
       .catch(() => { })
 
+    // Fetch default data dir
+    invoke<string | null>("rime_get_data_dir")
+      .then((d) => setDefaultDir(d ?? null))
+      .catch(() => { })
+
+    // Check macOS IME install status
+    if (map[p] === "macos") {
+      invoke<{ installed: boolean }>("macos_ime_status")
+        .then((s) => setImeInstalled(s.installed))
+        .catch(() => { })
+    }
+
     listen<InstallProgress>("install-progress", (e) => {
       setProgress(e.payload)
+      setDefaultInstallProgress(e.payload)
     }).then((fn) => { unlistenRef.current = fn })
 
     return () => unlistenRef.current?.()
   }, [])
 
-  const osMeta = OS_META[osType]
   const activePlatform = downloadSource === "gitee" ? releaseInfo?.gitee : releaseInfo?.github
   const downloadUrl = activePlatform?.download_urls?.[osType as keyof PlatformRelease["download_urls"]]
 
@@ -335,8 +275,7 @@ export default function App() {
       }
     } else {
       try {
-        const imType = osType === "linux" ? linuxImType : null
-        const dir = await invoke<string | null>("select_directory", { imType })
+        const dir = await invoke<string | null>("select_directory", { imType: null })
         if (dir) {
           setSelectedDir(dir)
           setSafUri(null)
@@ -396,18 +335,104 @@ export default function App() {
       .finally(() => setIsFetchingRelease(false))
   }
 
+  async function handleInstallIme() {
+    setIsInstallingIme(true)
+    setImeInstallError(null)
+    try {
+      await invoke("macos_install_ime")
+      setImeInstalled(true)
+    } catch (e) {
+      setImeInstallError(String(e))
+    } finally {
+      setIsInstallingIme(false)
+    }
+  }
+
+  async function handleUninstallIme() {
+    try {
+      await invoke("macos_uninstall_ime")
+      setImeInstalled(false)
+    } catch (e) {
+      setImeInstallError(String(e))
+    }
+  }
+
+  async function handleDownloadDefault() {
+    if (!downloadUrl) return
+    setIsDownloadingDefault(true)
+    setDefaultInstallResult(null)
+    setDefaultInstallError(null)
+    setDefaultInstallProgress(null)
+    try {
+      const result = await invoke<InstallResult>("rime_install_to_default", { url: downloadUrl })
+      setDefaultInstallResult(result)
+    } catch (e) {
+      setDefaultInstallError(String(e))
+    } finally {
+      setIsDownloadingDefault(false)
+      setDefaultInstallProgress(null)
+    }
+  }
+
+  // ── Release source picker (shared widget) ────────────────────────────────
+  const VersionPicker = (
+    <div className="flex items-center gap-1.5">
+      {releaseInfo?.github && (
+        <div className="flex gap-1">
+          {(["github", "gitee"] as const).map((src) => {
+            const p = src === "github" ? releaseInfo.github : releaseInfo.gitee
+            if (!p) return null
+            return (
+              <button
+                key={src}
+                onClick={() => setDownloadSource(src)}
+                className={`px-2 py-0.5 text-xs rounded border transition-colors font-mono ${downloadSource === src
+                  ? "bg-primary text-primary-foreground border-primary"
+                  : "bg-transparent text-muted-foreground border-border hover:border-foreground/40"
+                  }`}
+              >
+                {src === "github" ? "GitHub" : "Gitee"} {p.version}
+              </button>
+            )
+          })}
+        </div>
+      )}
+      {releaseInfo && !releaseInfo.github && (
+        <Badge variant="secondary" className="font-mono text-xs">{releaseInfo.version}</Badge>
+      )}
+      {releaseInfo?.body && (
+        <button
+          onClick={() => setShowChangelog(true)}
+          className="text-xs text-muted-foreground hover:text-foreground transition-colors underline underline-offset-2"
+        >
+          更新内容
+        </button>
+      )}
+      {isFetchingRelease
+        ? <RefreshCw className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
+        : <Button variant="ghost" size="icon" className="h-6 w-6" onClick={handleRefetchRelease} title="检查新版本">
+          <RefreshCw className="h-3.5 w-3.5" />
+        </Button>
+      }
+    </div>
+  )
+
+  // ── Install result dialog (shared) ─────────────────────────────────────────
+  const resultToShow = installResult ?? defaultInstallResult
+  const clearResult = () => { setInstallResult(null); setDefaultInstallResult(null) }
+
   return (
     <div className="min-h-screen bg-background text-foreground">
       <div className="max-w-2xl mx-auto px-4 py-8 space-y-4">
 
         {/* Header */}
         <div className="text-center space-y-2 pb-2">
-          <img src="/logo.png" alt="键道安装器" className="h-16 w-16 mx-auto" />
+          <img src="/logo.png" alt="键道输入法" className="h-16 w-16 mx-auto" />
           <h1 className="text-2xl font-bold tracking-tight">
-            键道安装器{appVersion && <span className="ml-2 text-base font-normal text-muted-foreground">v{appVersion}</span>}
+            键道输入法{appVersion && <span className="ml-2 text-base font-normal text-muted-foreground">v{appVersion}</span>}
           </h1>
           <p className="text-sm text-muted-foreground">
-            自动下载最新版键道输入方案并安装到 Rime 配置目录
+            基于 librime 的跨平台原生输入法
           </p>
         </div>
 
@@ -422,9 +447,7 @@ export default function App() {
             <div className="flex items-center gap-2">
               <Download className="h-4 w-4 text-primary shrink-0" />
               <span>安装器有新版本可用</span>
-              <Badge variant="secondary" className="font-mono text-xs">
-                v{installerUpdate.latest_version}
-              </Badge>
+              <Badge variant="secondary" className="font-mono text-xs">v{installerUpdate.latest_version}</Badge>
             </div>
             <div className="flex items-center gap-2 text-muted-foreground text-xs shrink-0">
               <span>当前 v{installerUpdate.current_version}</span>
@@ -433,255 +456,164 @@ export default function App() {
           </a>
         )}
 
-        {/* Step 1: Rime 安装指南 */}
-        {osMeta && (
+        {/* ══ Step 1: 安装输入法（macOS 专属）══════════════════════════════ */}
+        {osType === "macos" && (
           <Card>
             <CardHeader className="pb-3">
               <CardTitle className="text-sm font-semibold flex items-center gap-2">
                 <span className="flex items-center justify-center w-5 h-5 rounded-full bg-primary text-primary-foreground text-xs font-bold">1</span>
-                安装 Rime 输入法
+                安装 KeyTao 系统输入法
+                <span className="ml-auto">
+                  {imeInstalled
+                    ? <Badge className="text-xs gap-1 bg-green-500/20 text-green-400 border-green-500/30"><CheckCircle2 className="h-3 w-3" />已安装</Badge>
+                    : <Badge variant="outline" className="text-xs">未安装</Badge>
+                  }
+                </span>
               </CardTitle>
             </CardHeader>
             <CardContent className="space-y-3">
-              <div className="flex items-center gap-2 text-sm">
-                {osMeta.icon}
-                <span className="font-medium">{osMeta.label}</span>
-                <Separator orientation="vertical" className="h-4" />
-                <span className="text-muted-foreground">{osMeta.rime.name}</span>
-              </div>
-
-              <Separator />
-
-              <div className="space-y-1 divide-y divide-border">
-                {osMeta.rime.note && (
-                  <InfoRow label="安装方式">
-                    <span className="text-muted-foreground">{osMeta.rime.note}</span>
-                  </InfoRow>
-                )}
-                {osMeta.rime.commands && (
-                  <InfoRow label="命令安装">
-                    <div className="space-y-1 w-full">
-                      {osMeta.rime.commands.map((cmd, i) => (
-                        <CodeBlock key={i}>{cmd}</CodeBlock>
-                      ))}
-                    </div>
-                  </InfoRow>
-                )}
-                <InfoRow label="下载地址">
-                  <a
-                    href={osMeta.rime.url}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="text-primary hover:underline inline-flex items-start gap-1 break-all"
-                  >
-                    <span className="break-all">{osMeta.rime.url}</span>
-                    <ExternalLink className="h-3 w-3 shrink-0 mt-0.5" />
-                  </a>
-                </InfoRow>
-                <InfoRow label="配置目录">
-                  <code className="text-xs bg-muted px-2 py-0.5 rounded font-mono break-all">
-                    {osType === "linux"
-                      ? linuxImType === "ibus"
-                        ? "~/.config/ibus/rime"
-                        : "~/.local/share/fcitx5/rime"
-                      : osMeta.rime.configPath}
-                  </code>
-                </InfoRow>
-                {osMeta.rime.nixosNote && osMeta.rime.nixosUrl && (
-                  <InfoRow label="NixOS">
-                    <a
-                      href={osMeta.rime.nixosUrl}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="text-primary hover:underline inline-flex items-start gap-1"
-                    >
-                      <span className="break-all">{osMeta.rime.nixosNote}</span>
-                      <ExternalLink className="h-3 w-3 shrink-0 mt-0.5" />
-                    </a>
-                  </InfoRow>
-                )}
-                {osMeta.rime.appPackage && (
-                  <InfoRow label="快捷入口">
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      className="gap-1.5 h-7 text-xs"
-                      onClick={() =>
-                        invoke("android_open_app", { packageName: osMeta.rime.appPackage })
-                          .catch((e) => setInstallError(String(e)))
-                      }
-                    >
-                      <ExternalLink className="h-3.5 w-3.5" />
-                      打开{osMeta.rime.name}
-                    </Button>
-                  </InfoRow>
+              <p className="text-sm text-muted-foreground">
+                将 KeyTao.app 安装到 <code className="text-xs bg-muted px-1.5 py-0.5 rounded font-mono">~/Library/Input Methods/</code>，成为 macOS 原生系统输入法。
+              </p>
+              {imeInstallError && (
+                <div className="flex items-start gap-2 text-sm text-destructive bg-destructive/10 border border-destructive/20 rounded-lg px-3 py-2.5">
+                  <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
+                  <span>{imeInstallError}</span>
+                </div>
+              )}
+              <div className="flex gap-2 flex-wrap">
+                <Button size="sm" onClick={handleInstallIme} disabled={isInstallingIme} className="gap-1.5">
+                  <Cpu className="h-4 w-4" />
+                  {isInstallingIme ? "安装中..." : imeInstalled ? "重新安装" : "安装输入法"}
+                </Button>
+                {imeInstalled && (
+                  <Button variant="outline" size="sm" onClick={handleUninstallIme}
+                    className="gap-1.5 text-destructive hover:text-destructive">
+                    卸载
+                  </Button>
                 )}
               </div>
+              {imeInstalled && (
+                <p className="text-xs text-muted-foreground">
+                  如未出现「键道」，请前往<strong>系统设置 → 键盘 → 输入来源</strong>手动添加。
+                </p>
+              )}
             </CardContent>
           </Card>
         )}
 
-        {/* Step 2: 安装键道方案 */}
-        <Card>
-          <CardHeader className="pb-3">
-            <CardTitle className="text-sm font-semibold flex items-center gap-2">
-              <span className="flex items-center justify-center w-5 h-5 rounded-full bg-primary text-primary-foreground text-xs font-bold">2</span>
-              安装键道方案
-              <div className="ml-auto flex items-center gap-1.5">
-                {releaseInfo?.github && (
-                  <div className="flex gap-1">
-                    {(["github", "gitee"] as const).map((src) => {
-                      const p = src === "github" ? releaseInfo.github : releaseInfo.gitee
-                      if (!p) return null
-                      return (
-                        <button
-                          key={src}
-                          onClick={() => setDownloadSource(src)}
-                          className={`px-2 py-0.5 text-xs rounded border transition-colors font-mono ${downloadSource === src
-                            ? "bg-primary text-primary-foreground border-primary"
-                            : "bg-transparent text-muted-foreground border-border hover:border-foreground/40"
-                            }`}
-                        >
-                          {src === "github" ? "GitHub" : "Gitee"} {p.version}
-                        </button>
-                      )
-                    })}
-                  </div>
-                )}
-                {releaseInfo && !releaseInfo.github && (
-                  <Badge variant="secondary" className="font-mono text-xs">
-                    {releaseInfo.version}
-                  </Badge>
-                )}
-                {releaseInfo?.body && (
-                  <button
-                    onClick={() => setShowChangelog(true)}
-                    className="text-xs text-muted-foreground hover:text-foreground transition-colors underline underline-offset-2"
-                    title="查看更新内容"
-                  >
-                    更新内容
-                  </button>
-                )}
-                {isFetchingRelease ? (
-                  <RefreshCw className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
-                ) : (
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    className="h-6 w-6"
-                    onClick={handleRefetchRelease}
-                    title="检查新版本"
-                  >
-                    <RefreshCw className="h-3.5 w-3.5" />
-                  </Button>
-                )}
-              </div>
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-4">
-
-            {/* Warnings */}
-            {releaseError && (
-              <div className="flex items-start gap-2 text-sm text-destructive bg-destructive/10 border border-destructive/20 rounded-lg px-3 py-2.5">
-                <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
-                <span>获取版本信息失败：{releaseError}</span>
-              </div>
-            )}
-
-            {!downloadUrl && releaseInfo && !isFetchingRelease && (
-              <div className="flex items-start gap-2 text-sm text-yellow-400 bg-yellow-400/10 border border-yellow-400/20 rounded-lg px-3 py-2.5">
-                <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
-                <span>
-                  当前系统（{osMeta?.label}）在 {downloadSource === "gitee" ? "Gitee" : "GitHub"} 上暂无对应安装包
-                  {downloadSource === "gitee" && releaseInfo.github?.download_urls[osType as keyof PlatformRelease["download_urls"]] && (
-                    <button
-                      onClick={() => setDownloadSource("github")}
-                      className="ml-1 underline hover:no-underline"
-                    >
-                      切换到 GitHub
-                    </button>
-                  )}
+        {/* ══ Step 2: 安装键道方案到默认目录（所有平台）════════════════════ */}
+        {osType !== "android" && osType !== "ios" && (
+          <Card>
+            <CardHeader className="pb-3">
+              <CardTitle className="text-sm font-semibold flex items-center gap-2">
+                <span className="flex items-center justify-center w-5 h-5 rounded-full bg-primary text-primary-foreground text-xs font-bold">
+                  {osType === "macos" ? "2" : "1"}
                 </span>
-              </div>
-            )}
-
-            <div className="flex items-start gap-2 text-sm text-yellow-400/80 bg-yellow-400/8 border border-yellow-400/15 rounded-lg px-3 py-2.5">
-              <Info className="h-4 w-4 shrink-0 mt-0.5" />
-              <span>
-                智能安装：仅覆盖 <code className="text-xs bg-yellow-400/10 px-1 rounded">opencc/</code>、
-                <code className="text-xs bg-yellow-400/10 px-1 rounded">lua/</code>、键道词库文件，
-                自动合并 <code className="text-xs bg-yellow-400/10 px-1 rounded">default.custom.yaml</code> 和{" "}
-                <code className="text-xs bg-yellow-400/10 px-1 rounded">rime.lua</code>（同名 lua 文件自动重命名保留），其余文件不受影响
-              </span>
-            </div>
-
-            {/* Directory Selection */}
-            <div className="space-y-3">
-              {osType === "linux" && (
-                <div className="flex items-center gap-2">
-                  <span className="text-xs text-muted-foreground shrink-0">输入法框架</span>
-                  <div className="flex gap-1">
-                    {(["fcitx5", "ibus"] as const).map((im) => (
-                      <button
-                        key={im}
-                        onClick={() => setLinuxImType(im)}
-                        disabled={isInstalling}
-                        className={`px-3 py-1 text-xs rounded-md border transition-colors ${linuxImType === im
-                          ? "bg-primary text-primary-foreground border-primary"
-                          : "bg-transparent text-muted-foreground border-border hover:border-foreground/40 hover:text-foreground"
-                          }`}
-                      >
-                        {im === "fcitx5" ? "Fcitx5" : "iBus"}
-                      </button>
-                    ))}
-                  </div>
+                安装键道方案
+                <div className="ml-auto">{VersionPicker}</div>
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              {defaultDir && (
+                <div className="flex items-center gap-2 text-xs text-muted-foreground bg-muted/40 border border-border rounded-lg px-3 py-2">
+                  <Info className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                  <span>安装目录：<code className="font-mono">{defaultDir}</code></span>
                 </div>
               )}
+              {releaseError && (
+                <div className="flex items-start gap-2 text-sm text-destructive bg-destructive/10 border border-destructive/20 rounded-lg px-3 py-2.5">
+                  <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
+                  <span>获取版本信息失败：{releaseError}</span>
+                </div>
+              )}
+              {defaultInstallError && (
+                <div className="flex items-start gap-2 text-sm text-destructive bg-destructive/10 border border-destructive/20 rounded-lg px-3 py-2.5">
+                  <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
+                  <span>{defaultInstallError}</span>
+                </div>
+              )}
+              {isDownloadingDefault && defaultInstallProgress && (
+                <div className="space-y-1.5">
+                  <Progress value={defaultInstallProgress.percent} className="h-1.5" />
+                  <p className="text-xs text-muted-foreground">{defaultInstallProgress.message}</p>
+                </div>
+              )}
+              <Button size="sm" onClick={handleDownloadDefault}
+                disabled={isDownloadingDefault || !downloadUrl} className="gap-1.5">
+                <Download className="h-4 w-4" />
+                {isDownloadingDefault ? "下载中..." : "一键安装方案"}
+              </Button>
+            </CardContent>
+          </Card>
+        )}
 
+        {/* ══ Step 3: 测试 & 状态（桌面平台）══════════════════════════════ */}
+        {osType !== "android" && osType !== "ios" && (
+          <Card>
+            <CardHeader className="pb-3">
+              <CardTitle className="text-sm font-semibold flex items-center gap-2">
+                <span className="flex items-center justify-center w-5 h-5 rounded-full bg-primary text-primary-foreground text-xs font-bold">
+                  {osType === "macos" ? "3" : "2"}
+                </span>
+                测试 &amp; 状态
+                <span className="ml-auto">
+                  <Badge variant="secondary" className="text-xs gap-1">
+                    <Keyboard className="h-3 w-3" />librime
+                  </Badge>
+                </span>
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              <ImePanel userDataDir={defaultDir ?? undefined} />
+            </CardContent>
+          </Card>
+        )}
+
+        {/* ══ 扩展功能（所有平台，可折叠）══════════════════════════════════ */}
+        <Card>
+          <CardHeader className="pb-0">
+            <button
+              onClick={() => setShowExtensions(v => !v)}
+              className="w-full flex items-center gap-2 text-sm font-semibold py-0.5 text-left"
+            >
+              <Settings className="h-4 w-4 text-muted-foreground" />
+              <span>扩展功能</span>
+              <span className="ml-auto text-muted-foreground">
+                {showExtensions ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
+              </span>
+            </button>
+          </CardHeader>
+          {showExtensions && (
+            <CardContent className="space-y-4 pt-4">
+              <div className="flex items-center gap-2">
+                <FolderOpen className="h-4 w-4 text-muted-foreground" />
+                <span className="text-sm font-medium">安装方案到自定义目录</span>
+              </div>
               <div className="flex gap-2 flex-wrap">
-                <Button
-                  variant="default"
-                  size="sm"
-                  onClick={handleSelectDir}
-                  disabled={isInstalling || (osType === "linux" && linuxImType === null)}
-                  className="gap-1.5"
-                >
+                <Button variant="outline" size="sm" onClick={handleSelectDir} disabled={isInstalling} className="gap-1.5">
                   <FolderOpen className="h-4 w-4" />
-                  {selectedDir ? "重新选择目录" : "选择 Rime 配置目录"}
+                  {selectedDir ? "重新选择目录" : "选择目录"}
                 </Button>
-
                 {selectedDir && downloadUrl && (
-                  <Button
-                    variant="secondary"
-                    size="sm"
-                    onClick={handleInstall}
-                    disabled={isInstalling}
-                    className="gap-1.5"
-                  >
+                  <Button variant="secondary" size="sm" onClick={handleInstall} disabled={isInstalling} className="gap-1.5">
                     <Download className="h-4 w-4" />
                     {isInstalling ? "安装中..." : "立即安装"}
                   </Button>
                 )}
               </div>
-
-
-              {/* Selected directory + file list */}
               {selectedDir && (
                 <div className="space-y-2">
                   <div className="flex items-center gap-2 bg-muted/40 border border-border rounded-lg px-3 py-2">
                     <CheckCircle2 className="h-4 w-4 text-green-500 shrink-0" />
-                    <code className="text-xs font-mono text-muted-foreground break-all flex-1 min-w-0">
-                      {selectedDir}
-                    </code>
+                    <code className="text-xs font-mono text-muted-foreground break-all flex-1 min-w-0">{selectedDir}</code>
                   </div>
-
                   {localSchemas !== null && (
                     <div className="flex items-start gap-2 text-xs bg-muted/40 border border-border rounded-lg px-3 py-2">
                       <Info className="h-3.5 w-3.5 shrink-0 mt-0.5 text-muted-foreground" />
-                      {localSchemas.length === 0 ? (
-                        <span className="text-muted-foreground">未检测到 default.custom.yaml，将自动创建</span>
-                      ) : (
-                        <span className="text-muted-foreground">
+                      {localSchemas.length === 0
+                        ? <span className="text-muted-foreground">未检测到 default.custom.yaml，将自动创建</span>
+                        : <span className="text-muted-foreground">
                           检测到本地方案：
                           {localSchemas.map((s, i) => (
                             <span key={s}>
@@ -689,41 +621,30 @@ export default function App() {
                               {i < localSchemas.length - 1 && "、"}
                             </span>
                           ))}
-                          {localSchemas.some(s => !s.startsWith("keytao")) && (
-                            <span className="text-foreground/70">（非键道方案将被保留）</span>
-                          )}
                         </span>
-                      )}
+                      }
                     </div>
                   )}
-
-                  <FileList
-                    files={files}
-                    loading={isLoadingFiles}
-                    onRefresh={handleRefreshFiles}
-                    disabled={isInstalling}
-                  />
+                  <FileList files={files} loading={isLoadingFiles} onRefresh={handleRefreshFiles} disabled={isInstalling} />
                 </div>
               )}
-            </div>
-
-            {/* Progress */}
-            {isInstalling && progress && (
-              <div className="space-y-1.5">
-                <Progress value={progress.percent} className="h-1.5" />
-                <p className="text-xs text-muted-foreground">{progress.message}</p>
-              </div>
-            )}
-
-            {installError && (
-              <div className="flex items-start gap-2 text-sm text-destructive bg-destructive/10 border border-destructive/20 rounded-lg px-3 py-2.5">
-                <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
-                <span>{installError}</span>
-              </div>
-            )}
-          </CardContent>
+              {isInstalling && progress && (
+                <div className="space-y-1.5">
+                  <Progress value={progress.percent} className="h-1.5" />
+                  <p className="text-xs text-muted-foreground">{progress.message}</p>
+                </div>
+              )}
+              {installError && (
+                <div className="flex items-start gap-2 text-sm text-destructive bg-destructive/10 border border-destructive/20 rounded-lg px-3 py-2.5">
+                  <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
+                  <span>{installError}</span>
+                </div>
+              )}
+            </CardContent>
+          )}
         </Card>
 
+        {/* ── 更新内容弹窗 ──────────────────────────────────────────────── */}
         <Dialog open={showChangelog} onOpenChange={setShowChangelog}>
           <DialogContent className="max-w-sm">
             <DialogHeader>
@@ -739,13 +660,12 @@ export default function App() {
                 </div>
               </DialogDescription>
             </DialogHeader>
-            <Button onClick={() => setShowChangelog(false)} className="w-full mt-2">
-              关闭
-            </Button>
+            <Button onClick={() => setShowChangelog(false)} className="w-full mt-2">关闭</Button>
           </DialogContent>
         </Dialog>
 
-        <Dialog open={!!installResult} onOpenChange={(open) => { if (!open) setInstallResult(null) }}>
+        {/* ── 安装结果弹窗 ──────────────────────────────────────────────── */}
+        <Dialog open={!!resultToShow} onOpenChange={(open) => { if (!open) clearResult() }}>
           <DialogContent className="max-w-sm">
             <DialogHeader>
               <DialogTitle className="flex items-center gap-2 text-green-400">
@@ -757,29 +677,29 @@ export default function App() {
                   <p className="text-sm text-foreground">
                     请在输入法中点击<strong>重新部署</strong>以生效
                   </p>
-                  {installResult && installResult.merged_schemas.length > 0 && (
+                  {resultToShow && resultToShow.merged_schemas.length > 0 && (
                     <p className="text-xs text-muted-foreground">
                       已智能合并本地方案：
-                      {installResult.merged_schemas.map((s, i) => (
+                      {resultToShow.merged_schemas.map((s, i) => (
                         <span key={s}>
                           <code className="font-mono bg-muted px-1 rounded">{s}</code>
-                          {i < installResult.merged_schemas.length - 1 && "、"}
+                          {i < resultToShow.merged_schemas.length - 1 && "、"}
                         </span>
                       ))}
                     </p>
                   )}
-                  {installResult && installResult.verify.length > 0 && (() => {
-                    const failCount = installResult.verify.filter(v => !v.ok).length
+                  {resultToShow && resultToShow.verify.length > 0 && (() => {
+                    const failCount = resultToShow.verify.filter(v => !v.ok).length
                     return (
                       <details className="text-xs" open={failCount > 0}>
                         <summary className="cursor-pointer select-none py-1 flex items-center gap-1.5">
                           {failCount > 0
                             ? <span className="text-destructive">校验失败 {failCount} 项，可能未正确安装</span>
-                            : <span className="text-green-400">校验通过（{installResult.verify.length} 项）</span>
+                            : <span className="text-green-400">校验通过（{resultToShow.verify.length} 项）</span>
                           }
                         </summary>
                         <div className="mt-1 max-h-48 overflow-y-auto rounded-md bg-muted/60 border border-border p-2 space-y-0.5">
-                          {installResult.verify.map((entry, i) => (
+                          {resultToShow.verify.map((entry, i) => (
                             <div key={i} className="flex items-start gap-1.5 font-mono text-[11px] leading-5">
                               <span className={entry.ok ? "text-green-400 shrink-0" : "text-destructive shrink-0"}>
                                 {entry.ok ? "✓" : "✗"}
@@ -794,30 +714,20 @@ export default function App() {
                       </details>
                     )
                   })()}
-                  {installResult && installResult.logs.length > 0 && (
+                  {resultToShow && resultToShow.logs.length > 0 && (
                     <details className="text-xs">
                       <summary className="cursor-pointer text-muted-foreground hover:text-foreground select-none py-1">
-                        安装日志（{installResult.logs.length} 条）
+                        安装日志（{resultToShow.logs.length} 条）
                       </summary>
                       <div className="mt-1 max-h-48 overflow-y-auto rounded-md bg-muted/60 border border-border p-2 space-y-0.5">
-                        {installResult.logs.map((line, i) => (
-                          <div
-                            key={i}
-                            className={`font-mono text-[11px] leading-5 ${line.startsWith("[ERROR]")
-                              ? "text-destructive"
-                              : line.startsWith("[WARN]")
-                                ? "text-yellow-400"
-                                : line.includes("[root]")
-                                  ? "text-orange-400"
-                                  : line.includes("[forced]")
-                                    ? "text-yellow-300"
-                                    : line.startsWith("[MERGED]") || line.startsWith("[RENAMED]")
-                                      ? "text-primary"
-                                      : "text-muted-foreground"
-                              }`}
-                          >
-                            {line}
-                          </div>
+                        {resultToShow.logs.map((line, i) => (
+                          <div key={i} className={`font-mono text-[11px] leading-5 ${line.startsWith("[ERROR]") ? "text-destructive"
+                            : line.startsWith("[WARN]") ? "text-yellow-400"
+                              : line.includes("[root]") ? "text-orange-400"
+                                : line.includes("[forced]") ? "text-yellow-300"
+                                  : line.startsWith("[MERGED]") || line.startsWith("[RENAMED]") ? "text-primary"
+                                    : "text-muted-foreground"
+                            }`}>{line}</div>
                         ))}
                       </div>
                     </details>
@@ -825,9 +735,7 @@ export default function App() {
                 </div>
               </DialogDescription>
             </DialogHeader>
-            <Button onClick={() => setInstallResult(null)} className="w-full mt-2">
-              好的
-            </Button>
+            <Button onClick={clearResult} className="w-full mt-2">好的</Button>
           </DialogContent>
         </Dialog>
 

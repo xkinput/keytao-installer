@@ -1,0 +1,13 @@
+[package]
+name = "keytao-core"
+version = "0.1.0"
+edition = "2021"
+description = "Platform-agnostic librime engine wrapper for KeyTao IME"
+
+[dependencies]
+serde = { workspace = true }
+dirs = { workspace = true }
+
+# librime is only available on desktop targets
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+rime-api = { version = "0.12.2", features = ["serde"] }

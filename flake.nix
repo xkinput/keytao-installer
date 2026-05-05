@@ -46,10 +46,16 @@
           packages = [
             androidSdk
             pkgs.jdk17
+            # librime + headers for building the IME engine module
+            pkgs.librime
+            pkgs.pkg-config
           ];
 
           ANDROID_HOME = "${androidSdk}/libexec/android-sdk";
           NDK_HOME = "${androidSdk}/libexec/android-sdk/ndk/${ndkVersion}";
+          # Point librime-sys to the Nix-provided librime
+          RIME_INCLUDE_DIR = "${pkgs.librime}/include";
+          RIME_LIB_DIR = "${pkgs.librime}/lib";
 
           shellHook = ''
             export JAVA_HOME="${pkgs.jdk17}"

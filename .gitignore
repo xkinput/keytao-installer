@@ -23,7 +23,40 @@ dist-ssr
 *.sln
 *.sw?
 
+# Secrets / signing
 keytao-installer.jks
 keystore.properties
 
+# Nix / direnv
 .direnv
+result
+result-*
+
+# Rust / Cargo build outputs
+target/
+**/*.rs.bk
+Cargo.lock
+
+# Tauri build artefacts
+src-tauri/target/
+src-tauri/gen/android/
+src-tauri/gen/apple/
+
+# Frontend build output
+dist/
+dist-ssr/
+
+# Test / coverage
+coverage/
+*.lcov
+
+# macOS IME build artefacts
+crates/keytao-macos-ime/build/
+crates/keytao-macos-ime/.build/
+crates/keytao-macos-ime/Sources/CKeytaoCore/
+crates/keytao-macos-ime/Resources/appex_Info.plist
+crates/keytao-macos-ime/Resources/container_Info.plist
+
+# macOS
+.DS_Store
+**/.DS_Store

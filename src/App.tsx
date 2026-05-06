@@ -103,6 +103,13 @@ interface DeployStep {
   error?: boolean
 }
 
+interface LinuxImeStatus {
+  installed: boolean
+  binary_path: string
+  autostart: boolean
+  display_server: "wayland" | "x11" | "unknown"
+}
+
 function safUriToDisplayPath(uri: string): string {
   try {
     const treeId = decodeURIComponent(uri.split("/tree/")[1] || "")
@@ -214,6 +221,11 @@ export default function App() {
   const [extError, setExtError] = useState<string | null>(null)
   const [extResult, setExtResult] = useState<InstallResult | null>(null)
 
+  // Linux IME
+  const [linuxIme, setLinuxIme] = useState<LinuxImeStatus | null>(null)
+  const [isInstallingLinuxIme, setIsInstallingLinuxIme] = useState(false)
+  const [linuxImeError, setLinuxImeError] = useState<string | null>(null)
+
   const unlistenInstallRef = useRef<(() => void) | null>(null)
   const unlistenDeployRef = useRef<(() => void) | null>(null)
 
@@ -255,6 +267,12 @@ export default function App() {
         .catch(() => { })
     }
 
+    if (os === "linux") {
+      invoke<LinuxImeStatus>("linux_ime_status")
+        .then(setLinuxIme)
+        .catch(() => { })
+    }
+
     listen<InstallProgress>("install-progress", (e) => {
       setInstallProgress(e.payload)
       setExtProgress(e.payload)
@@ -269,6 +287,28 @@ export default function App() {
   const activePlatform = downloadSource === "gitee" ? releaseInfo?.gitee : releaseInfo?.github
   const downloadUrl = activePlatform?.download_urls?.[osType as keyof PlatformRelease["download_urls"]]
   const isBusy = isInstalling || isDeploying
+
+  async function handleLinuxInstallIme() {
+    setIsInstallingLinuxIme(true)
+    setLinuxImeError(null)
+    try {
+      const status = await invoke<LinuxImeStatus>("linux_install_ime")
+      setLinuxIme(status)
+    } catch (e) {
+      setLinuxImeError(String(e))
+    } finally {
+      setIsInstallingLinuxIme(false)
+    }
+  }
+
+  async function handleLinuxUninstallIme() {
+    try {
+      const status = await invoke<LinuxImeStatus>("linux_uninstall_ime")
+      setLinuxIme(status)
+    } catch (e) {
+      setLinuxImeError(String(e))
+    }
+  }
 
   async function handleCheckLocalSchema() {
     setIsCheckingLocal(true)
@@ -581,6 +621,104 @@ export default function App() {
                     <p className="text-xs text-muted-foreground">
                       如未出现「键道」，请前往<strong>系统设置 → 键盘 → 输入来源</strong>手动添加。
                     </p>
+                  )}
+                </CardContent>
+              </Card>
+            )}
+
+            {/* ══ Linux IME 安装 & 配置引导 ════════════════════════════════ */}
+            {osType === "linux" && (
+              <Card>
+                <CardHeader className="pb-3">
+                  <CardTitle className="text-sm font-semibold flex items-center gap-2">
+                    <Cpu className="h-4 w-4 text-muted-foreground" />
+                    Linux 输入法引擎
+                    <span className="ml-auto flex items-center gap-1.5">
+                      {linuxIme?.installed
+                        ? <Badge className="text-xs gap-1 bg-green-500/20 text-green-400 border-green-500/30"><CheckCircle2 className="h-3 w-3" />已安装</Badge>
+                        : <Badge variant="outline" className="text-xs">未安装</Badge>
+                      }
+                      {linuxIme && (
+                        <Badge variant="secondary" className="text-xs font-mono">
+                          {linuxIme.display_server === "wayland" ? "Wayland" : linuxIme.display_server === "x11" ? "X11" : "未检测到"}
+                        </Badge>
+                      )}
+                    </span>
+                  </CardTitle>
+                </CardHeader>
+                <CardContent className="space-y-3">
+                  <p className="text-sm text-muted-foreground">
+                    安装独立的 <code className="text-xs bg-muted px-1 py-0.5 rounded font-mono">keytao-ime</code> 二进制到
+                    <code className="text-xs bg-muted px-1 py-0.5 rounded font-mono ml-1">~/.local/bin/</code>，
+                    并创建开机自启动条目。无需 IBus / Fcitx5。
+                  </p>
+
+                  {linuxImeError && (
+                    <div className="flex items-start gap-2 text-sm text-destructive bg-destructive/10 border border-destructive/20 rounded-lg px-3 py-2.5">
+                      <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
+                      <span>{linuxImeError}</span>
+                    </div>
+                  )}
+
+                  {linuxIme?.installed && (
+                    <div className="flex items-center gap-2 text-xs text-muted-foreground bg-muted/40 border border-border rounded-lg px-3 py-2">
+                      <Info className="h-3.5 w-3.5 shrink-0" />
+                      <span>
+                        <code className="font-mono">{linuxIme.binary_path}</code>
+                        {linuxIme.autostart && <span className="ml-2 text-green-400">· 已设置开机自启</span>}
+                      </span>
+                    </div>
+                  )}
+
+                  <div className="flex gap-2 flex-wrap">
+                    <Button size="sm" onClick={handleLinuxInstallIme} disabled={isInstallingLinuxIme} className="gap-1.5">
+                      <Cpu className="h-4 w-4" />
+                      {isInstallingLinuxIme ? "安装中..." : linuxIme?.installed ? "重新安装" : "安装输入法"}
+                    </Button>
+                    {linuxIme?.installed && (
+                      <Button variant="outline" size="sm" onClick={handleLinuxUninstallIme}
+                        className="gap-1.5 text-destructive hover:text-destructive">卸载</Button>
+                    )}
+                  </div>
+
+                  {/* 配置引导 */}
+                  {linuxIme && (
+                    <div className="rounded-lg border border-border bg-muted/20 p-3 space-y-2">
+                      <p className="text-xs font-semibold text-foreground">
+                        {linuxIme.display_server === "wayland" ? "Wayland 配置" : linuxIme.display_server === "x11" ? "X11 配置" : "配置方式"}
+                      </p>
+                      {linuxIme.display_server === "wayland" && (
+                        <div className="space-y-1.5 text-xs text-muted-foreground">
+                          <p>Compositor 需支持 <code className="bg-muted px-1 rounded">zwp_input_method_v2</code>（KDE Plasma ≥ 5.24、Sway ≥ 1.7、Wayfire、river）。</p>
+                          <p>安装后注销并重新登录即可自动启动。</p>
+                          <p className="text-muted-foreground/60">手动启动（调试用）：</p>
+                          <pre className="bg-muted rounded px-2 py-1.5 font-mono text-[11px] select-all">keytao-ime</pre>
+                          <p className="text-yellow-400/80">⚠ GNOME 暂不支持 zwp_input_method_v2，请使用 KDE / Sway 等。</p>
+                        </div>
+                      )}
+                      {linuxIme.display_server === "x11" && (
+                        <div className="space-y-1.5 text-xs text-muted-foreground">
+                          <p>在会话启动脚本（<code className="bg-muted px-1 rounded">~/.xprofile</code> 或 <code className="bg-muted px-1 rounded">~/.xinitrc</code>）中添加：</p>
+                          <pre className="bg-muted rounded px-2 py-1.5 font-mono text-[11px] select-all whitespace-pre">{`export XMODIFIERS=@im=keytao\nexport GTK_IM_MODULE=xim\nexport QT_IM_MODULE=xim`}</pre>
+                          <p>然后注销重新登录，或在当前终端 <code className="bg-muted px-1 rounded">source ~/.xprofile</code> 后手动运行：</p>
+                          <pre className="bg-muted rounded px-2 py-1.5 font-mono text-[11px] select-all">keytao-ime &amp;</pre>
+                          <p>应用需重启才能识别新的 XMODIFIERS 环境变量。</p>
+                        </div>
+                      )}
+                      {linuxIme.display_server === "unknown" && (
+                        <div className="space-y-2 text-xs text-muted-foreground">
+                          <p>未检测到 <code className="bg-muted px-1 rounded">WAYLAND_DISPLAY</code> 或 <code className="bg-muted px-1 rounded">DISPLAY</code>，请根据你的会话类型选择配置方式：</p>
+                          <details>
+                            <summary className="cursor-pointer hover:text-foreground py-0.5">Wayland 配置</summary>
+                            <pre className="mt-1.5 bg-muted rounded px-2 py-1.5 font-mono text-[11px] select-all">keytao-ime</pre>
+                          </details>
+                          <details>
+                            <summary className="cursor-pointer hover:text-foreground py-0.5">X11 配置</summary>
+                            <pre className="mt-1.5 bg-muted rounded px-2 py-1.5 font-mono text-[11px] select-all whitespace-pre">{`export XMODIFIERS=@im=keytao\nexport GTK_IM_MODULE=xim\nexport QT_IM_MODULE=xim\nkeytao-ime &`}</pre>
+                          </details>
+                        </div>
+                      )}
+                    </div>
                   )}
                 </CardContent>
               </Card>

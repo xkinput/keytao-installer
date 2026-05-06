@@ -76,6 +76,7 @@ fn build_client(app: &AppHandle) -> Result<reqwest::Client, String> {
     let version = app.package_info().version.to_string();
     reqwest::Client::builder()
         .user_agent(format!("keytao-installer/{version}"))
+        .connect_timeout(std::time::Duration::from_secs(8))
         .build()
         .map_err(|e| e.to_string())
 }
@@ -92,6 +93,8 @@ fn parse_download_urls(obj: &serde_json::Value) -> DownloadUrls {
 
 #[tauri::command]
 async fn fetch_latest_release(app: AppHandle) -> Result<ReleaseInfo, String> {
+    let t0 = std::time::Instant::now();
+    tracing::info!("[fetch_latest_release] start");
     let cache_path = app
         .path()
         .app_cache_dir()
@@ -112,6 +115,10 @@ async fn fetch_latest_release(app: AppHandle) -> Result<ReleaseInfo, String> {
     });
     if let Some(ref c) = cached {
         if now.saturating_sub(c.cached_at) < 300 {
+            tracing::info!(
+                "[fetch_latest_release] cache hit, {}ms",
+                t0.elapsed().as_millis()
+            );
             return Ok(c.release.clone());
         }
     }
@@ -121,21 +128,30 @@ async fn fetch_latest_release(app: AppHandle) -> Result<ReleaseInfo, String> {
 
     let response = client
         .get(&url)
+        .timeout(std::time::Duration::from_secs(10))
         .send()
         .await
         .map_err(|e| format!("网络请求失败: {e}"))?;
 
     if !response.status().is_success() {
+        tracing::warn!(
+            "[fetch_latest_release] HTTP {} after {}ms",
+            response.status(),
+            t0.elapsed().as_millis()
+        );
         if let Some(c) = cached {
             return Ok(c.release);
         }
         return Err(format!("获取版本信息失败，HTTP {}", response.status()));
     }
 
-    let data: serde_json::Value = response
-        .json()
-        .await
-        .map_err(|e| format!("解析响应失败: {e}"))?;
+    let data: serde_json::Value = response.json().await.map_err(|e| {
+        tracing::warn!(
+            "[fetch_latest_release] body parse failed after {}ms: {e}",
+            t0.elapsed().as_millis()
+        );
+        format!("解析响应失败: {e}")
+    })?;
 
     let github_version = data["github"]["version"].as_str().unwrap_or("").to_string();
     let github = if !github_version.is_empty() {
@@ -185,6 +201,10 @@ async fn fetch_latest_release(app: AppHandle) -> Result<ReleaseInfo, String> {
             .and_then(|s| std::fs::write(&path, s).ok());
     }
 
+    tracing::info!(
+        "[fetch_latest_release] done in {}ms",
+        t0.elapsed().as_millis()
+    );
     Ok(info)
 }
 
@@ -1121,14 +1141,27 @@ pub struct InstallerUpdateInfo {
 
 #[tauri::command]
 async fn check_installer_update(app: AppHandle) -> Result<InstallerUpdateInfo, String> {
+    let t0 = std::time::Instant::now();
+    tracing::info!("[check_installer_update] start");
     let current = app.package_info().version.to_string();
     let client = build_client(&app)?;
     let resp = client
         .get("https://api.github.com/repos/xkinput/keytao-installer/releases/latest")
+        .timeout(std::time::Duration::from_secs(8))
         .send()
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| {
+            tracing::warn!(
+                "[check_installer_update] failed after {}ms: {e}",
+                t0.elapsed().as_millis()
+            );
+            e.to_string()
+        })?;
     let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    tracing::info!(
+        "[check_installer_update] done in {}ms",
+        t0.elapsed().as_millis()
+    );
     let latest_tag = json["tag_name"].as_str().unwrap_or("").to_string();
     let latest = latest_tag.trim_start_matches('v').to_string();
     let release_url = json["html_url"].as_str().unwrap_or("").to_string();
@@ -1347,6 +1380,138 @@ async fn rime_install_to_default(_app: AppHandle, _url: String) -> Result<Instal
     Err("Not supported on mobile".into())
 }
 
+// ─── Linux IME install & status ──────────────────────────────────────────────
+
+#[derive(Serialize, Clone)]
+pub struct LinuxImeStatus {
+    pub installed: bool,
+    pub binary_path: String,
+    pub autostart: bool,
+    pub display_server: String, // "wayland" | "x11" | "unknown"
+}
+
+#[cfg(target_os = "linux")]
+fn linux_ime_status_inner(app: &AppHandle) -> LinuxImeStatus {
+    let binary_path = dirs::home_dir()
+        .map(|h| h.join(".local/bin/keytao-ime"))
+        .unwrap_or_default();
+    let autostart_path = dirs::home_dir()
+        .map(|h| h.join(".config/autostart/keytao-ime.desktop"))
+        .unwrap_or_default();
+    let display_server = if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+        "wayland".into()
+    } else if std::env::var_os("DISPLAY").is_some() {
+        "x11".into()
+    } else {
+        "unknown".into()
+    };
+    // Check sidecar availability as a proxy for "this feature is supported in this build"
+    let _ = app;
+    LinuxImeStatus {
+        installed: binary_path.exists(),
+        binary_path: binary_path.to_string_lossy().into_owned(),
+        autostart: autostart_path.exists(),
+        display_server,
+    }
+}
+
+#[tauri::command]
+#[cfg(target_os = "linux")]
+fn linux_ime_status(app: AppHandle) -> LinuxImeStatus {
+    linux_ime_status_inner(&app)
+}
+
+#[tauri::command]
+#[cfg(target_os = "linux")]
+async fn linux_install_ime(app: AppHandle) -> Result<LinuxImeStatus, String> {
+    use std::os::unix::fs::PermissionsExt;
+    use tauri::Manager;
+
+    // Resolve the bundled sidecar binary
+    let resource_path = app
+        .path()
+        .resource_dir()
+        .map_err(|e| e.to_string())?
+        .join("keytao-ime");
+
+    if !resource_path.exists() {
+        return Err(format!(
+            "找不到捆绑的 keytao-ime 二进制：{}",
+            resource_path.display()
+        ));
+    }
+
+    // Install to ~/.local/bin/keytao-ime
+    let local_bin = dirs::home_dir()
+        .ok_or("无法确定用户主目录")?
+        .join(".local/bin");
+    std::fs::create_dir_all(&local_bin).map_err(|e| format!("无法创建 ~/.local/bin: {e}"))?;
+
+    let dest = local_bin.join("keytao-ime");
+    std::fs::copy(&resource_path, &dest).map_err(|e| format!("复制二进制失败: {e}"))?;
+    std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755))
+        .map_err(|e| format!("设置权限失败: {e}"))?;
+
+    // Write ~/.config/autostart/keytao-ime.desktop
+    let autostart_dir = dirs::home_dir()
+        .ok_or("无法确定用户主目录")?
+        .join(".config/autostart");
+    std::fs::create_dir_all(&autostart_dir).map_err(|e| format!("无法创建 autostart 目录: {e}"))?;
+
+    let desktop_content = format!(
+        "[Desktop Entry]\nType=Application\nName=KeyTao IME\nComment=KeyTao input method engine (Wayland/X11)\nExec={bin}\nX-GNOME-Autostart-enabled=true\nHidden=false\nNoDisplay=false\n",
+        bin = dest.to_string_lossy()
+    );
+    std::fs::write(autostart_dir.join("keytao-ime.desktop"), desktop_content)
+        .map_err(|e| format!("写入 autostart 条目失败: {e}"))?;
+
+    Ok(linux_ime_status_inner(&app))
+}
+
+#[tauri::command]
+#[cfg(target_os = "linux")]
+fn linux_uninstall_ime(app: AppHandle) -> Result<LinuxImeStatus, String> {
+    let binary = dirs::home_dir()
+        .ok_or("无法确定用户主目录")?
+        .join(".local/bin/keytao-ime");
+    let desktop = dirs::home_dir()
+        .ok_or("无法确定用户主目录")?
+        .join(".config/autostart/keytao-ime.desktop");
+
+    if binary.exists() {
+        std::fs::remove_file(&binary).map_err(|e| format!("删除二进制失败: {e}"))?;
+    }
+    if desktop.exists() {
+        std::fs::remove_file(&desktop).map_err(|e| format!("删除 autostart 条目失败: {e}"))?;
+    }
+
+    Ok(linux_ime_status_inner(&app))
+}
+
+// Non-linux stubs
+#[tauri::command]
+#[cfg(not(target_os = "linux"))]
+fn linux_ime_status(_app: AppHandle) -> LinuxImeStatus {
+    LinuxImeStatus {
+        installed: false,
+        binary_path: String::new(),
+        autostart: false,
+        display_server: "unknown".into(),
+    }
+}
+
+#[tauri::command]
+#[cfg(not(target_os = "linux"))]
+async fn linux_install_ime(_app: AppHandle) -> Result<LinuxImeStatus, String> {
+    Err("仅 Linux 支持".into())
+}
+
+#[tauri::command]
+#[cfg(not(target_os = "linux"))]
+fn linux_uninstall_ime(_app: AppHandle) -> Result<LinuxImeStatus, String> {
+    Err("仅 Linux 支持".into())
+}
+
 // ─── Entry point ─────────────────────────────────────────────────────────────
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -1515,6 +1680,9 @@ pub fn run() {
             android_smart_extract,
             check_local_schema,
             rime_deploy_default,
+            linux_ime_status,
+            linux_install_ime,
+            linux_uninstall_ime,
             // ── IME engine commands (desktop only) ──
             #[cfg(not(any(target_os = "android", target_os = "ios")))]
             rime::rime_setup,

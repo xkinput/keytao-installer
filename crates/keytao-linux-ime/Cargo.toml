@@ -16,17 +16,18 @@ serde = { workspace = true }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
-# Wayland: input-method-v2 + layer-shell
+# Wayland: input-method-v2 (from wayland-protocols-misc) + layer-shell
 wayland-client = "0.31"
-wayland-protocols = { version = "0.32", features = ["client", "unstable"] }
-wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+wayland-protocols-misc = { version = "0.3", features = ["client"] }
 
-# Keyboard: XKB state machine (convert evdev codes → X11 keysyms + modifiers)
-xkbcommon = "0.7"
+# XKB state machine for both Wayland (evdev→keysym) and X11 (keycode→keysym)
+xkbcommon = { version = "0.7", features = ["wayland", "x11"] }
 
 # X11: XIM server + candidate window
-xim = { version = "0.4", features = ["x11rb"] }
+xim = { version = "0.5", features = ["x11rb-server", "x11rb-xcb"] }
 x11rb = { version = "0.13", features = ["allow-unsafe-code"] }
+libc = "0.2"
+dirs = "5"
 
 # Candidate panel rendering (software rasteriser, no GPU required)
 tiny-skia = "0.11"

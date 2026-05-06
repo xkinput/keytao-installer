@@ -16,6 +16,7 @@ pub struct ImeState {
     pub is_last_page: bool,
     pub committed: Option<String>,
     pub select_keys: Option<String>,
+    pub ascii_mode: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -34,6 +35,7 @@ impl ImeState {
             is_last_page: true,
             committed: None,
             select_keys: None,
+            ascii_mode: false,
         }
     }
 }
@@ -112,6 +114,20 @@ mod desktop {
             self.session.process_key(KeyEvent::new(0xff1b_u32, 0)); // XK_Escape
             ImeState::empty()
         }
+
+        pub fn current_schema_name(&self) -> String {
+            self.session
+                .status()
+                .map(|s| s.schema_name().to_string())
+                .unwrap_or_else(|_| "unknown".to_string())
+        }
+
+        pub fn is_ascii_mode(&self) -> bool {
+            self.session
+                .status()
+                .map(|s| s.is_ascii_mode)
+                .unwrap_or(false)
+        }
     }
 
     fn extract_state(session: &rime_api::Session) -> ImeState {
@@ -138,6 +154,8 @@ mod desktop {
             })
             .collect();
 
+        let ascii_mode = session.status().map(|s| s.is_ascii_mode).unwrap_or(false);
+
         ImeState {
             preedit,
             cursor,
@@ -146,6 +164,7 @@ mod desktop {
             is_last_page: menu.is_last_page,
             committed,
             select_keys: menu.select_keys.map(|s: &str| s.to_string()),
+            ascii_mode,
         }
     }
 }
@@ -167,7 +186,7 @@ pub fn default_user_data_dir() -> Option<PathBuf> {
     }
     #[cfg(target_os = "linux")]
     {
-        return dirs::config_dir().map(|c| c.join("keytao"));
+        return dirs::data_local_dir().map(|d| d.join("keytao"));
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     {
@@ -195,6 +214,18 @@ pub fn default_shared_data_dir() -> String {
     }
     #[cfg(target_os = "linux")]
     {
+        // Prefer user-local keytao schemas (e.g. installed via fcitx5/keytao-installer);
+        // fall back to system-wide rime-data.
+        let candidates = [
+            dirs::data_local_dir().map(|d| d.join("keytao")),
+            dirs::data_local_dir().map(|d| d.join("fcitx5/rime")),
+            Some(std::path::PathBuf::from("/usr/share/rime-data")),
+        ];
+        for p in candidates.into_iter().flatten() {
+            if crate::has_schemas(&p) {
+                return p.to_string_lossy().into_owned();
+            }
+        }
         return "/usr/share/rime-data".to_string();
     }
     #[cfg(target_os = "windows")]

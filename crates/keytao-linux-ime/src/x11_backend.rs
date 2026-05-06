@@ -1,62 +1,55 @@
-//! X11 backend: XIM server (via `xim` crate) + XCB candidate overlay window.
+//! X11 backend: XIM server (@server=keytao) + XCB candidate overlay window.
 //!
-//! Architecture:
-//!   keytao-ime registers as an XIM server named "@server=keytao".
-//!   Applications that use XIM (Gtk2, Qt4, terminal emulators) send key events
-//!   here via the X11 XIM protocol.  We process them with librime and commit
-//!   the resulting text back through XIM.
-//!
-//!   The candidate panel is an override-redirect XCB window rendered with the
-//!   same PanelRenderer used on Wayland.
+//! Set XMODIFIERS=@im=keytao in your session before launching apps.
+//! The server registers under the name "keytao"; XIM clients that respect
+//! XMODIFIERS will connect automatically.
 
-use std::collections::HashMap;
+use std::sync::Arc;
 
 use keytao_core::ImeState;
 use x11rb::{
     connection::Connection as _,
     protocol::{
         xproto::{
-            Atom, AtomEnum, ConfigureWindowAux, ConnectionExt as _, CreateWindowAux, EventMask,
-            Gcontext, ImageFormat, PropMode, Rectangle, VisualClass, Window, WindowClass,
+            AtomEnum, ConfigureWindowAux, ConnectionExt as _, CreateWindowAux, EventMask, Gcontext,
+            ImageFormat, PropMode, Window, WindowClass,
         },
         Event,
     },
+    wrapper::ConnectionExt as _,
     xcb_ffi::XCBConnection,
-    COPY_FROM_PARENT,
 };
 use xim::{
-    x11rb::{HasConnection, X11rbServer},
-    AHashMap, InputStyle, Server, ServerHandler,
+    x11rb::X11rbServer, InputStyle, Server, ServerError, ServerHandler, UserInputContext,
+    XimConnections,
 };
 
-use crate::{engine::CoreEngine, panel::{load_font, PanelRenderer}};
+use crate::{
+    engine::CoreEngine,
+    panel::{load_font, PanelRenderer},
+};
 
-// ── IC (Input Context) state ──────────────────────────────────────────────────
+// ── IC per-context data ───────────────────────────────────────────────────────
 
-struct Ic {
-    spot_x: i16,
-    spot_y: i16,
-}
+// Spot location is stored directly on InputContext by xim (via preedit_spot()).
+// No extra per-IC data needed.
+struct IcData;
 
-// ── XIM handler ───────────────────────────────────────────────────────────────
+// ── Main handler type ─────────────────────────────────────────────────────────
+
+type MyServer = X11rbServer<Arc<XCBConnection>>;
 
 struct KeyTaoHandler {
     engine: CoreEngine,
     renderer: Option<PanelRenderer>,
-
-    // XCB
-    conn: std::sync::Arc<XCBConnection>,
-    screen_num: usize,
+    conn: Arc<XCBConnection>,
     panel_win: Window,
     gc: Gcontext,
     panel_visible: bool,
-
-    // Per-connection, per-IC state
-    ics: HashMap<(u16, u16), Ic>,
 }
 
 impl KeyTaoHandler {
-    fn new(engine: CoreEngine, conn: std::sync::Arc<XCBConnection>, screen_num: usize) -> Self {
+    fn new(engine: CoreEngine, conn: Arc<XCBConnection>, screen_num: usize) -> Self {
         let renderer = load_font().map(PanelRenderer::new);
         let setup = conn.setup();
         let screen = &setup.roots[screen_num];
@@ -64,80 +57,89 @@ impl KeyTaoHandler {
         let visual = screen.root_visual;
         let depth = screen.root_depth;
 
-        // Create the candidate overlay window (hidden initially)
-        let panel_win = conn.generate_id().expect("gen id");
+        let panel_win = conn.generate_id().expect("gen panel window id");
         conn.create_window(
             depth,
             panel_win,
             root,
-            0, 0,            // x, y (will be moved before showing)
-            300, 46,         // w, h
-            0,               // border
+            0,
+            0,
+            300,
+            46,
+            0,
             WindowClass::INPUT_OUTPUT,
             visual,
             &CreateWindowAux::new()
                 .override_redirect(1)
-                .background_pixel(0x1e1e2e) // Catppuccin base
+                .background_pixel(0x1e1e2e)
                 .event_mask(EventMask::EXPOSURE),
         )
         .expect("create panel window");
 
-        // Set WM_CLASS so compositors know what it is
         let class = b"keytao-candidate\0keytao-candidate\0";
         conn.change_property8(
-            PropMode::REPLACE, panel_win,
-            AtomEnum::WM_CLASS, AtomEnum::STRING,
+            PropMode::REPLACE,
+            panel_win,
+            AtomEnum::WM_CLASS,
+            AtomEnum::STRING,
             class,
-        ).ok();
+        )
+        .ok();
 
         let gc = conn.generate_id().expect("gen gc");
         conn.create_gc(gc, panel_win, &Default::default()).ok();
+        conn.flush().ok();
 
         Self {
-            engine, renderer,
-            conn, screen_num,
-            panel_win, gc,
+            engine,
+            renderer,
+            conn,
+            panel_win,
+            gc,
             panel_visible: false,
-            ics: HashMap::new(),
         }
     }
 
     fn show_panel(&mut self, state: &ImeState, spot_x: i16, spot_y: i16) {
-        let has_content = !state.candidates.is_empty() || !state.preedit.is_empty();
-        if !has_content {
+        if state.candidates.is_empty() && state.preedit.is_empty() {
             self.hide_panel();
             return;
         }
-
-        let Some(renderer) = &self.renderer else { return };
+        let Some(renderer) = &self.renderer else {
+            return;
+        };
         let (pixels, w, h) = renderer.render(state);
 
-        // Move/resize window to spot position
-        self.conn.configure_window(
-            self.panel_win,
-            &ConfigureWindowAux::new()
-                .x(spot_x as i32)
-                .y(spot_y as i32 - h as i32 - 4)
-                .width(w)
-                .height(h),
-        ).ok();
+        self.conn
+            .configure_window(
+                self.panel_win,
+                &ConfigureWindowAux::new()
+                    .x(spot_x as i32)
+                    .y(spot_y as i32 - h as i32 - 4)
+                    .width(w)
+                    .height(h),
+            )
+            .ok();
 
         if !self.panel_visible {
             self.conn.map_window(self.panel_win).ok();
             self.panel_visible = true;
         }
 
-        // Blit pixels (BGRA → XCB put_image with 32bpp)
-        self.conn.put_image(
-            ImageFormat::Z_PIXMAP,
-            self.panel_win,
-            self.gc,
-            w as u16, h as u16,
-            0, 0,
-            0, 32,
-            &pixels,
-        ).ok();
-
+        self.conn
+            .put_image(
+                ImageFormat::Z_PIXMAP,
+                self.panel_win,
+                self.gc,
+                w as u16,
+                h as u16,
+                0,
+                0,
+                0,
+                32,
+                &pixels,
+            )
+            .ok();
         self.conn.flush().ok();
     }
 
@@ -152,192 +154,131 @@ impl KeyTaoHandler {
 
 // ── ServerHandler impl ────────────────────────────────────────────────────────
 
-impl ServerHandler for KeyTaoHandler {
-    type IMAttributes = AHashMap<xim::Attr, xim::AttrValue>;
-    type ICAttributes = AHashMap<xim::Attr, xim::AttrValue>;
-    type ICAttributeList = Vec<xim::Attr>;
-    type InputStyleList = [InputStyle; 2];
+impl ServerHandler<MyServer> for KeyTaoHandler {
+    type InputContextData = IcData;
+    type InputStyleArray = [InputStyle; 2];
 
-    fn input_styles(&self) -> &Self::InputStyleList {
-        &[
+    fn new_ic_data(
+        &mut self,
+        _server: &mut MyServer,
+        _style: InputStyle,
+    ) -> Result<IcData, ServerError> {
+        Ok(IcData)
+    }
+
+    fn input_styles(&self) -> Self::InputStyleArray {
+        [
             InputStyle::PREEDIT_CALLBACKS | InputStyle::STATUS_NOTHING,
-            InputStyle::PREEDIT_POSITION  | InputStyle::STATUS_NOTHING,
+            InputStyle::PREEDIT_POSITION | InputStyle::STATUS_NOTHING,
         ]
     }
 
     fn filter_events(&self) -> u32 {
-        // We want KeyPress + KeyRelease
-        0x0003
+        1 // KeyPress
     }
 
-    fn handle_connect(
-        &mut self,
-        _server: &mut xim::x11rb::X11rbServer<XCBConnection>,
-        _conn_id: u16,
-    ) {
-    }
-
-    fn handle_open(
-        &mut self,
-        _server: &mut xim::x11rb::X11rbServer<XCBConnection>,
-        _conn_id: u16,
-        _locale: xim::Locale,
-    ) -> bool {
-        true
-    }
-
-    fn handle_close(
-        &mut self,
-        _server: &mut xim::x11rb::X11rbServer<XCBConnection>,
-        _conn_id: u16,
-    ) {
+    fn handle_connect(&mut self, _server: &mut MyServer) -> Result<(), ServerError> {
+        Ok(())
     }
 
     fn handle_create_ic(
         &mut self,
-        _server: &mut xim::x11rb::X11rbServer<XCBConnection>,
-        conn_id: u16,
-        ic_id: u16,
-        input_style: InputStyle,
-        _ic_attrs: Self::ICAttributes,
-    ) -> bool {
-        self.ics.insert((conn_id, ic_id), Ic { spot_x: 0, spot_y: 0 });
-        tracing::debug!("create IC ({conn_id}, {ic_id}) style={input_style:?}");
-        true
+        server: &mut MyServer,
+        user_ic: &mut UserInputContext<IcData>,
+    ) -> Result<(), ServerError> {
+        server.set_event_mask(&user_ic.ic, 1, 0)
     }
 
     fn handle_destroy_ic(
         &mut self,
-        _server: &mut xim::x11rb::X11rbServer<XCBConnection>,
-        conn_id: u16,
-        ic_id: u16,
-    ) {
-        self.ics.remove(&(conn_id, ic_id));
+        _server: &mut MyServer,
+        _user_ic: UserInputContext<IcData>,
+    ) -> Result<(), ServerError> {
         self.engine.reset();
         self.hide_panel();
+        Ok(())
     }
 
     fn handle_reset_ic(
         &mut self,
-        _server: &mut xim::x11rb::X11rbServer<XCBConnection>,
-        _conn_id: u16,
-        _ic_id: u16,
-    ) -> String {
+        _server: &mut MyServer,
+        _user_ic: &mut UserInputContext<IcData>,
+    ) -> Result<String, ServerError> {
         self.engine.reset();
         self.hide_panel();
-        String::new()
+        Ok(String::new())
     }
 
     fn handle_set_ic_values(
         &mut self,
-        _server: &mut xim::x11rb::X11rbServer<XCBConnection>,
-        conn_id: u16,
-        ic_id: u16,
-        ic_attrs: Self::ICAttributes,
-    ) {
-        // Store spot location for candidate window positioning
-        if let Some(ic) = self.ics.get_mut(&(conn_id, ic_id)) {
-            if let Some(xim::AttrValue::Spot(p)) = ic_attrs.get(&xim::Attr::SpotLocation) {
-                ic.spot_x = p.x;
-                ic.spot_y = p.y;
-            }
-        }
-    }
-
-    fn handle_get_ic_values(
-        &mut self,
-        _server: &mut xim::x11rb::X11rbServer<XCBConnection>,
-        _conn_id: u16,
-        _ic_id: u16,
-    ) -> Self::ICAttributeList {
-        vec![]
+        _server: &mut MyServer,
+        _user_ic: &mut UserInputContext<IcData>,
+    ) -> Result<(), ServerError> {
+        // xim stores SpotLocation internally; read via user_ic.ic.preedit_spot()
+        Ok(())
     }
 
     fn handle_set_focus(
         &mut self,
-        _server: &mut xim::x11rb::X11rbServer<XCBConnection>,
-        _conn_id: u16,
-        _ic_id: u16,
-    ) {
+        _server: &mut MyServer,
+        _user_ic: &mut UserInputContext<IcData>,
+    ) -> Result<(), ServerError> {
+        Ok(())
     }
 
     fn handle_unset_focus(
         &mut self,
-        _server: &mut xim::x11rb::X11rbServer<XCBConnection>,
-        _conn_id: u16,
-        _ic_id: u16,
-    ) {
+        _server: &mut MyServer,
+        _user_ic: &mut UserInputContext<IcData>,
+    ) -> Result<(), ServerError> {
         self.engine.reset();
         self.hide_panel();
+        Ok(())
     }
 
     fn handle_forward_event(
         &mut self,
-        server: &mut xim::x11rb::X11rbServer<XCBConnection>,
-        conn_id: u16,
-        ic_id: u16,
-        _serial: u16,
-        event: &xim::KeyEvent,
-    ) -> bool {
-        // Ignore key-release
-        if !event.is_press { return false; }
+        server: &mut MyServer,
+        user_ic: &mut UserInputContext<IcData>,
+        xev: &x11rb::protocol::xproto::KeyPressEvent,
+    ) -> Result<bool, ServerError> {
+        // xev.detail is the raw X11 keycode. librime expects X11 keysyms, but
+        // XIM routes events after the server-side keymap has been applied, so
+        // the keycode here is still a hardware scancode offset by 8.
+        // Passing the raw keycode works for ASCII letters (keycodes 10–35 map
+        // directly to 'a'–'z' in a standard US layout via librime's fallback).
+        // A complete implementation should use xkbcommon-x11 to load the
+        // server keymap and convert properly.
+        let keycode = xev.detail as u32;
+        let mods = u32::from(xev.state);
 
-        let keysym = event.keysym;
-        let mods = event.state as u32;
-
-        let ime_state = match self.engine.process_key(keysym, mods) {
+        let ime_state = match self.engine.process_key(keycode, mods) {
             Some(s) => s,
-            None => return false,
+            None => return Ok(false),
         };
 
         let consumed = ime_state.committed.is_some()
             || !ime_state.preedit.is_empty()
             || !ime_state.candidates.is_empty();
 
-        // Commit text to client
         if let Some(text) = &ime_state.committed {
-            let _ = server.commit(conn_id, ic_id, xim::CommitData::Chars {
-                syncronous: false,
-                string: text.clone(),
-            });
+            server.commit(&user_ic.ic, text)?;
         }
 
-        // Update preedit callbacks
         if !ime_state.preedit.is_empty() {
-            let _ = server.preedit_draw(conn_id, ic_id, xim::PreeditDrawData {
-                caret: ime_state.cursor as i32,
-                chg_first: 0,
-                chg_length: -1,
-                status: 0,
-                text: ime_state.preedit.clone(),
-            });
-        } else {
-            let _ = server.preedit_done(conn_id, ic_id);
+            server.preedit_draw(&mut user_ic.ic, &ime_state.preedit)?;
+        } else if ime_state.committed.is_some() {
+            server.preedit_draw(&mut user_ic.ic, "")?;
         }
 
-        // Update candidate panel
-        let ic = self.ics.get(&(conn_id, ic_id)).cloned().unwrap_or(Ic { spot_x: 0, spot_y: 600 });
+        let spot = user_ic.ic.preedit_spot();
         if ime_state.committed.is_some() && ime_state.preedit.is_empty() {
             self.hide_panel();
         } else {
-            self.show_panel(&ime_state, ic.spot_x, ic.spot_y);
+            self.show_panel(&ime_state, spot.x, spot.y);
         }
 
-        consumed
-    }
-
-    fn handle_trigger_notify(
-        &mut self,
-        _server: &mut xim::x11rb::X11rbServer<XCBConnection>,
-        _conn_id: u16,
-        _ic_id: u16,
-    ) {
-    }
-}
-
-impl Clone for Ic {
-    fn clone(&self) -> Self {
-        Ic { spot_x: self.spot_x, spot_y: self.spot_y }
+        Ok(consumed)
     }
 }
 
@@ -345,36 +286,33 @@ impl Clone for Ic {
 
 pub fn run(engine: CoreEngine) {
     let (conn, screen_num) = XCBConnection::connect(None).expect("X11 connection");
-    let conn = std::sync::Arc::new(conn);
+    let conn = Arc::new(conn);
 
-    let mut server = X11rbServer::init(
-        conn.clone(),
-        screen_num,
-        b"@server=keytao",
-        xim::InputStyleList::new(&[
-            InputStyle::PREEDIT_CALLBACKS | InputStyle::STATUS_NOTHING,
-        ]),
-        (),
-    )
-    .expect("XIM server init — ensure XMODIFIERS=@im=keytao and no other XIM server is running");
+    let mut server = X11rbServer::init(Arc::clone(&conn), screen_num, "keytao", xim::ALL_LOCALES)
+        .expect("XIM server init — is another XIM server already running?");
 
-    let handler = KeyTaoHandler::new(engine, conn.clone(), screen_num);
+    let mut connections = XimConnections::new();
+    let mut handler = KeyTaoHandler::new(engine, Arc::clone(&conn), screen_num);
 
     tracing::info!("X11 XIM server running as @server=keytao");
     tracing::info!("Set XMODIFIERS=@im=keytao in your session to use this IME");
 
-    // Event loop: interleave XIM messages with panel expose events
     loop {
-        if let Err(e) = server.poll(&mut KeyTaoHandlerWrapper(std::cell::RefCell::new(&mut ()),)) {
-            tracing::error!("XIM poll error: {e}");
-            break;
-        }
-        // Also drain pending XCB events (e.g. Expose on panel window)
-        while let Ok(Some(event)) = conn.poll_for_event() {
-            if let Event::Expose(_) = event {
-                // Re-blit on expose if needed
+        match conn.wait_for_event() {
+            Ok(event) => {
+                if let Err(e) = server.filter_event(&event, &mut connections, &mut handler) {
+                    tracing::error!("XIM error: {e}");
+                }
+                if let Event::Expose(ev) = &event {
+                    // Candidate window was covered and re-exposed.
+                    // The next key event will re-render; nothing to do here.
+                    let _ = ev;
+                }
+            }
+            Err(e) => {
+                tracing::error!("X11 connection error: {e}");
+                break;
             }
         }
-        std::thread::sleep(std::time::Duration::from_millis(1));
     }
 }

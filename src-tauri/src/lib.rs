@@ -1,13 +1,16 @@
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Emitter, Listener, Manager};
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 use keytao_core;
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 mod rime;
+
+#[cfg(target_os = "linux")]
+mod ime;
 
 #[derive(Serialize, Deserialize, Clone)]
 struct ReleaseCache {
@@ -1239,6 +1242,90 @@ fn copy_dir_all(src: &std::path::Path, dst: &std::path::Path) -> Result<(), Stri
     Ok(())
 }
 
+// ─── Local schema info ───────────────────────────────────────────────────────
+
+#[derive(Serialize, Clone)]
+pub struct LocalSchemaInfo {
+    pub installed: bool,
+    pub version: Option<String>,
+    pub schemas: Vec<String>,
+}
+
+#[tauri::command]
+fn check_local_schema(path: Option<String>) -> LocalSchemaInfo {
+    let dir: Option<PathBuf> = path.map(PathBuf::from).or_else(|| {
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        {
+            return keytao_core::default_user_data_dir();
+        }
+        #[cfg(any(target_os = "android", target_os = "ios"))]
+        {
+            return None;
+        }
+    });
+
+    let Some(dir) = dir else {
+        return LocalSchemaInfo {
+            installed: false,
+            version: None,
+            schemas: vec![],
+        };
+    };
+
+    let installed = dir.join("keytao.schema.yaml").exists()
+        || dir.join("build").join("keytao.table.bin").exists();
+
+    let version = std::fs::read_to_string(dir.join("version.txt"))
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    let schemas = read_local_schemas(dir.to_string_lossy().into_owned());
+
+    LocalSchemaInfo {
+        installed,
+        version,
+        schemas,
+    }
+}
+
+// ─── Deploy librime to default keytao data dir ────────────────────────────────
+
+#[derive(Serialize, Clone)]
+pub struct DeployResult {
+    pub success: bool,
+    pub message: String,
+}
+
+#[tauri::command]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+async fn rime_deploy_default(app: AppHandle) -> Result<DeployResult, String> {
+    let dest =
+        keytao_core::default_user_data_dir().ok_or("Cannot determine keytao data directory")?;
+    let user = dest.to_string_lossy().into_owned();
+    let shared = keytao_core::default_shared_data_dir();
+
+    let _ = app.emit("deploy-progress", "正在部署 librime...");
+
+    match tokio::task::spawn_blocking(move || keytao_core::deploy(user, shared)).await {
+        Ok(Ok(())) => {
+            let _ = app.emit("deploy-progress", "部署完成");
+            Ok(DeployResult {
+                success: true,
+                message: "部署成功".into(),
+            })
+        }
+        Ok(Err(e)) => Err(format!("部署失败: {e}")),
+        Err(e) => Err(format!("任务错误: {e}")),
+    }
+}
+
+#[tauri::command]
+#[cfg(any(target_os = "android", target_os = "ios"))]
+async fn rime_deploy_default(_app: AppHandle) -> Result<DeployResult, String> {
+    Err("Not supported on mobile".into())
+}
+
 // ─── Install schemas to default keytao data dir ───────────────────────────────
 
 /// Download the given zip URL and smart-install it to `~/Library/keytao`
@@ -1274,6 +1361,13 @@ pub fn run() {
     let builder = builder
         .plugin(tauri_plugin_global_shortcut::Builder::default().build())
         .manage(rime::RimeEngine::default())
+        .on_window_event(|window, event| {
+            #[cfg(target_os = "linux")]
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                let _ = window.hide();
+                api.prevent_close();
+            }
+        })
         .setup(|app| {
             use tauri_plugin_global_shortcut::{
                 Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState,
@@ -1297,6 +1391,107 @@ pub fn run() {
                         }
                     }
                 })?;
+            #[cfg(target_os = "linux")]
+            {
+                use ime::{TrayArc, TrayShared};
+                use std::sync::{Arc, RwLock};
+                use tauri::menu::{MenuBuilder, MenuItemBuilder};
+                use tauri::tray::TrayIconBuilder;
+
+                let tray_shared: TrayArc = Arc::new(RwLock::new(TrayShared {
+                    schema_name: "KeyTao".to_string(),
+                    redeploy_requested: false,
+                }));
+
+                let tray_arc_menu = tray_shared.clone();
+                let schema_item = MenuItemBuilder::with_id("schema", "方案: 初始化中...")
+                    .enabled(false)
+                    .build(app)?;
+                let mem_item = MenuItemBuilder::with_id("mem", "内存: ...")
+                    .enabled(false)
+                    .build(app)?;
+                let redeploy_item = MenuItemBuilder::with_id("redeploy", "重新部署").build(app)?;
+                let open_item = MenuItemBuilder::with_id("open", "打开主窗口").build(app)?;
+                let quit_item = MenuItemBuilder::with_id("quit", "退出").build(app)?;
+                let menu = MenuBuilder::new(app)
+                    .item(&schema_item)
+                    .item(&mem_item)
+                    .separator()
+                    .item(&open_item)
+                    .item(&redeploy_item)
+                    .separator()
+                    .item(&quit_item)
+                    .build()?;
+
+                let tray = TrayIconBuilder::new()
+                    .icon(app.default_window_icon().unwrap().clone())
+                    .menu(&menu)
+                    .tooltip("KeyTao 输入法")
+                    .on_menu_event({
+                        let tray_arc = tray_arc_menu.clone();
+                        let schema_item_cl = schema_item.clone();
+                        let mem_item_cl = mem_item.clone();
+                        move |app, event| {
+                            let id = event.id().as_ref();
+                            if id == "redeploy" {
+                                if let Ok(mut t) = tray_arc.write() {
+                                    t.redeploy_requested = true;
+                                }
+                            } else if id == "quit" {
+                                app.exit(0);
+                            } else if id == "open" {
+                                if let Some(w) = app.get_webview_window("main") {
+                                    let _ = w.show();
+                                    let _ = w.set_focus();
+                                }
+                            }
+                            let schema = tray_arc
+                                .read()
+                                .map(|t| t.schema_name.clone())
+                                .unwrap_or_default();
+                            let _ = schema_item_cl.set_text(format!("方案: {schema}"));
+                            use sysinfo::System;
+                            let mut sys = System::new();
+                            sys.refresh_memory();
+                            let mb = sys.used_memory() / 1024 / 1024;
+                            let _ = mem_item_cl.set_text(format!("内存: {mb} MB"));
+                        }
+                    })
+                    .on_tray_icon_event({
+                        let tray_arc2 = tray_arc_menu.clone();
+                        let schema_item_tray = schema_item.clone();
+                        let mem_item_tray = mem_item.clone();
+                        move |_tray, event| {
+                            // Refresh when the tray icon is right-clicked (menu about to open).
+                            if let tauri::tray::TrayIconEvent::Click { .. } = event {
+                                let schema = tray_arc2
+                                    .read()
+                                    .map(|t| t.schema_name.clone())
+                                    .unwrap_or_default();
+                                let _ = schema_item_tray.set_text(format!("方案: {schema}"));
+                                use sysinfo::System;
+                                let mut sys = System::new();
+                                sys.refresh_memory();
+                                let mb = sys.used_memory() / 1024 / 1024;
+                                let _ = mem_item_tray.set_text(format!("内存: {mb} MB"));
+                            }
+                        }
+                    })
+                    .build(app)?;
+                drop(tray);
+
+                // Listen for schema-changed events from the IME thread to update the tray item.
+                let schema_item_listen = schema_item.clone();
+                app.handle()
+                    .listen("schema-changed", move |event: tauri::Event| {
+                        if let Ok(name) = serde_json::from_str::<String>(event.payload()) {
+                            let _ = schema_item_listen.set_text(format!("方案: {name}"));
+                        }
+                    });
+
+                ime::spawn(app.handle().clone(), tray_shared);
+            }
+
             Ok(())
         });
 
@@ -1318,6 +1513,8 @@ pub fn run() {
             android_list_files,
             android_read_local_schemas,
             android_smart_extract,
+            check_local_schema,
+            rime_deploy_default,
             // ── IME engine commands (desktop only) ──
             #[cfg(not(any(target_os = "android", target_os = "ios")))]
             rime::rime_setup,

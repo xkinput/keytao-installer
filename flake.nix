@@ -43,19 +43,68 @@
       in
       {
         devShells.default = pkgs.mkShell {
+          # Tools (go into PATH / nativeBuildInputs, no effect on RPATH)
           packages = [
             androidSdk
             pkgs.jdk17
-            # librime + headers for building the IME engine module
-            pkgs.librime
             pkgs.pkg-config
+          ];
+
+          # Runtime libraries: placed in buildInputs so the Nix cc-wrapper
+          # automatically injects -L/-rpath into NIX_LDFLAGS, which cargo uses
+          # when linking. This gives every compiled binary the correct RPATH
+          # without needing patchelf.
+          buildInputs = with pkgs; [
+            librime
+            xorg.libxcb
+            libxkbcommon
+            wayland
+            dbus
+            gtk3
+            webkitgtk_4_1
+            glib
+            gdk-pixbuf
+            pango
+            atk
+            cairo
+            harfbuzz
+            bzip2
+            openssl
+            libsoup_3
+            xdotool
+            libayatana-appindicator
           ];
 
           ANDROID_HOME = "${androidSdk}/libexec/android-sdk";
           NDK_HOME = "${androidSdk}/libexec/android-sdk/ndk/${ndkVersion}";
-          # Point librime-sys to the Nix-provided librime
           RIME_INCLUDE_DIR = "${pkgs.librime}/include";
           RIME_LIB_DIR = "${pkgs.librime}/lib";
+
+          # Ensure runtime libs are findable even when cargo doesn't embed RPATH.
+          # As a flake attribute (not shellHook), direnv's `use flake` exports this.
+          LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath (
+            with pkgs;
+            [
+              librime
+              xorg.libxcb
+              libxkbcommon
+              wayland
+              dbus
+              gtk3
+              webkitgtk_4_1
+              glib
+              gdk-pixbuf
+              pango
+              atk
+              cairo
+              harfbuzz
+              bzip2
+              openssl
+              libsoup_3
+              xdotool
+              libayatana-appindicator
+            ]
+          );
 
           shellHook = ''
             export JAVA_HOME="${pkgs.jdk17}"
@@ -64,6 +113,33 @@
             export PATH="${androidSdk}/libexec/android-sdk/platform-tools:$PATH"
             export PATH="${androidSdk}/libexec/android-sdk/cmdline-tools/${cmdLineToolsVer}/bin:$PATH"
 
+            # Embed RPATH for all runtime libs so binaries work without LD_LIBRARY_PATH.
+            # The -L flags are injected via NIX_LDFLAGS by mkShell; here we add -rpath
+            # so the dynamic linker finds the libs at runtime even outside the shell.
+            export RUSTFLAGS="-C link-arg=-Wl,-rpath,${
+              pkgs.lib.makeLibraryPath (
+                with pkgs;
+                [
+                  librime
+                  xorg.libxcb
+                  libxkbcommon
+                  wayland
+                  dbus
+                  gtk3
+                  webkitgtk_4_1
+                  glib
+                  gdk-pixbuf
+                  pango
+                  atk
+                  cairo
+                  harfbuzz
+                  bzip2
+                  openssl
+                  libsoup_3
+                  libayatana-appindicator
+                ]
+              )
+            }"
             # Install Android Rust cross-compilation targets (idempotent)
             for _t in aarch64-linux-android armv7-linux-androideabi i686-linux-android x86_64-linux-android; do
               rustup target add "$_t" 2>/dev/null || true

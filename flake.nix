@@ -122,15 +122,15 @@
             _pc_fix_dir=$(mktemp -d -t keytao-pkgfix.XXXXXX)
             cat > "$_pc_fix_dir/libayatana-appindicator3-0.1.pc" << PCEOF
 prefix=$_APPINDICATOR_PREFIX
-exec_prefix=\${prefix}
-libdir=\${prefix}/lib
-includedir=\${prefix}/include/libayatana-appindicator3-0.1
+exec_prefix=''${prefix}
+libdir=''${prefix}/lib
+includedir=''${prefix}/include/libayatana-appindicator3-0.1
 
 Name: libayatana-appindicator3
 Description: Application Indicators
 Version: 0.5.92
-Libs: -L\${libdir} -layatana-appindicator3
-Cflags: -I\${includedir}
+Libs: -L''${libdir} -layatana-appindicator3
+Cflags: -I''${includedir}
 PCEOF
             export PKG_CONFIG_PATH="$_pc_fix_dir:''${PKG_CONFIG_PATH:-}"
 

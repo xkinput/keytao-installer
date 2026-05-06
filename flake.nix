@@ -114,25 +114,34 @@
             export PATH="${androidSdk}/libexec/android-sdk/cmdline-tools/${cmdLineToolsVer}/bin:$PATH"
 
             # Fix for Tauri AppImage bundler on NixOS:
-            # pkg-config returns all transitive -L flags for libayatana-appindicator3,
-            # and Tauri's bundler treats the entire multi-word output as a single file
-            # path, causing "does not exist" errors.  We provide a minimal .pc file
-            # that returns only the direct library path so the bundler can parse it.
-            _APPINDICATOR_PREFIX="${pkgs.libayatana-appindicator}"
-            _pc_fix_dir=$(mktemp -d -t keytao-pkgfix.XXXXXX)
-            cat > "$_pc_fix_dir/libayatana-appindicator3-0.1.pc" << PCEOF
-prefix=$_APPINDICATOR_PREFIX
-exec_prefix=''${prefix}
-libdir=''${prefix}/lib
-includedir=''${prefix}/include/libayatana-appindicator3-0.1
-
-Name: libayatana-appindicator3
-Description: Application Indicators
-Version: 0.5.92
-Libs: -L''${libdir} -layatana-appindicator3
-Cflags: -I''${includedir}
-PCEOF
-            export PKG_CONFIG_PATH="$_pc_fix_dir:''${PKG_CONFIG_PATH:-}"
+            # Nix's pkg-config wrapper returns all transitive -L flags for
+            # libayatana-appindicator3-0.1 as a single string. Tauri's AppImage
+            # bundler treats this whole string as one file path → "does not exist".
+            #
+            # Solution: inject a pkg-config shim BEFORE the Nix wrapper in PATH.
+            # The shim intercepts the --libs query for libayatana-appindicator3-0.1
+            # and returns only the direct -L path + -l flag; all other queries are
+            # forwarded to the real pkg-config.
+            _pkgfix_dir=$(mktemp -d -t keytao-pkgfix.XXXXXX)
+            _appindicator_lib="${pkgs.libayatana-appindicator}/lib"
+            # $PKG_CONFIG is set by the Nix pkg-config wrapper; save it before
+            # we shadow `pkg-config` in PATH so the shim can forward other queries.
+            _real_pkgconfig="''${PKG_CONFIG:-$(which pkg-config)}"
+            cat > "$_pkgfix_dir/pkg-config" << 'SHIMEOF'
+#!/bin/sh
+if [ "$*" = "--libs libayatana-appindicator3-0.1" ] || \
+   [ "$*" = "libayatana-appindicator3-0.1 --libs" ]; then
+  echo "-L__LIBDIR__ -layatana-appindicator3"
+else
+  exec __REAL__ "$@"
+fi
+SHIMEOF
+            sed -i "s|__LIBDIR__|$_appindicator_lib|g" "$_pkgfix_dir/pkg-config"
+            sed -i "s|__REAL__|$_real_pkgconfig|g" "$_pkgfix_dir/pkg-config"
+            chmod +x "$_pkgfix_dir/pkg-config"
+            export PATH="$_pkgfix_dir:$PATH"
+            # Also point PKG_CONFIG at the shim so Tauri can find it via env var
+            export PKG_CONFIG="$_pkgfix_dir/pkg-config"
 
             # Embed RPATH for all runtime libs so binaries work without LD_LIBRARY_PATH.
             # The -L flags are injected via NIX_LDFLAGS by mkShell; here we add -rpath

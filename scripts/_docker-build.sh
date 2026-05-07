@@ -57,4 +57,12 @@ export PATH=/opt/linuxdeploy/usr/bin:$PATH
 
 # ── 5. Build ──────────────────────────────────────────────────────────────────
 pnpm install
+
+# Pre-build keytao-linux-ime independently so build.rs can copy it without
+# spawning a nested `cargo build` (which deadlocks on the target dir file lock).
+echo "==> Pre-building keytao-linux-ime..."
+cargo build -p keytao-linux-ime --release
+export KEYTAO_IME_PATH=/app/target/release/keytao-ime
+echo "==> keytao-ime binary: $(ls -lh $KEYTAO_IME_PATH)"
+
 pnpm tauri build --bundles deb,appimage

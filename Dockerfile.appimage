@@ -14,6 +14,12 @@ RUN apt-get update -qq && \
       gcc libc6-dev && \
     rm -rf /var/lib/apt/lists/*
 
+# Extra libs for keytao-linux-ime (separate layer to preserve cache above)
+RUN apt-get update -qq && \
+    apt-get install -y --no-install-recommends \
+      libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev && \
+    rm -rf /var/lib/apt/lists/*
+
 # Node.js 22 via NodeSource + pnpm
 RUN apt-get update -qq && \
     apt-get install -y --no-install-recommends ca-certificates curl && \

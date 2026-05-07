@@ -1,25 +1,30 @@
 fn main() {
-    // On Linux: build keytao-ime and embed it via include_bytes! so the final
-    // Tauri binary is fully self-contained (no externalBin sidecar needed).
+    // On Linux: embed the keytao-ime binary via include_bytes! for a fully
+    // self-contained release build.
     //
-    // We write the binary (or an empty placeholder) to $OUT_DIR/keytao-ime so
-    // that `include_bytes!(concat!(env!("OUT_DIR"), "/keytao-ime"))` always
-    // compiles, even during plain `cargo check`.
-    //
-    // Actual compilation only runs when TAURI_CLI_VERSION is set (i.e. the
-    // Tauri CLI invoked us) to avoid the cargo file-lock deadlock during
-    // `cargo check` / `cargo clippy`.
+    // Embedding strategy (avoids nested-cargo file-lock deadlock):
+    //   1. Release builds (scripts/_docker-build.sh): pre-build keytao-linux-ime
+    //      independently and set KEYTAO_IME_PATH to the binary path.
+    //      build.rs simply copies it — no nested `cargo build` needed.
+    //   2. Local `pnpm tauri dev/build` (TAURI_CLI_VERSION set, no KEYTAO_IME_PATH):
+    //      fall back to spawning `cargo build -p keytao-linux-ime`.
+    //   3. `cargo check` / `cargo clippy` (neither env var set): write an empty
+    //      placeholder so include_bytes! compiles without errors.
     #[cfg(target_os = "linux")]
     {
         println!("cargo:rerun-if-changed=../crates/keytao-linux-ime/src");
+        println!("cargo:rerun-if-env-changed=KEYTAO_IME_PATH");
         println!("cargo:rerun-if-env-changed=TAURI_CLI_VERSION");
 
         let out_dir = std::env::var("OUT_DIR").unwrap();
         let out_ime = std::path::Path::new(&out_dir).join("keytao-ime");
 
-        let invoked_by_tauri = std::env::var("TAURI_CLI_VERSION").is_ok();
-
-        if invoked_by_tauri {
+        if let Ok(pre_built) = std::env::var("KEYTAO_IME_PATH") {
+            // Path 1: pre-built binary provided by the build script
+            std::fs::copy(&pre_built, &out_ime)
+                .unwrap_or_else(|e| panic!("copy keytao-ime from {pre_built}: {e}"));
+        } else if std::env::var("TAURI_CLI_VERSION").is_ok() {
+            // Path 2: local tauri build — spawn nested cargo
             use std::process::Command;
 
             let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
@@ -51,7 +56,7 @@ fn main() {
 
             std::fs::copy(&built, &out_ime).expect("copy keytao-ime to OUT_DIR");
         } else {
-            // Placeholder so include_bytes! compiles during `cargo check`
+            // Path 3: cargo check / clippy — empty placeholder
             if !out_ime.exists() {
                 std::fs::write(&out_ime, b"").ok();
             }

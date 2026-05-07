@@ -46,6 +46,10 @@ src-tauri/gen/apple/
 dist/
 dist-ssr/
 
+# Linux build output
+*.AppImage
+*.deb
+
 # Test / coverage
 coverage/
 *.lcov

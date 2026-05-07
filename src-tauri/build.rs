@@ -3,7 +3,7 @@ fn main() {
     // self-contained release build.
     //
     // Embedding strategy (avoids nested-cargo file-lock deadlock):
-    //   1. Release builds (scripts/_docker-build.sh): pre-build keytao-linux-ime
+    //   1. Release builds (scripts/build-linux.sh / CI): pre-build keytao-linux-ime
     //      independently and set KEYTAO_IME_PATH to the binary path.
     //      build.rs simply copies it — no nested `cargo build` needed.
     //   2. Local `pnpm tauri dev/build` (TAURI_CLI_VERSION set, no KEYTAO_IME_PATH):

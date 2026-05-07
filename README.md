@@ -26,6 +26,14 @@
 
 ## 开发
 
+推荐使用 `direnv` 自动加载 flake 开发环境：
+
+```bash
+direnv allow
+```
+
+进入仓库目录后，`direnv` 会自动提供 Tauri / Android / Linux 打包所需环境变量。
+
 ```bash
 pnpm install
 pnpm tauri dev
@@ -35,6 +43,12 @@ pnpm tauri dev
 
 ```bash
 pnpm tauri build
+```
+
+Linux 打包（deb + AppImage）：
+
+```bash
+pnpm build:linux
 ```
 
 Android 构建需要配置 Android SDK 与 NDK，参考 [Tauri 移动端文档](https://tauri.app/start/prerequisites/#android)。

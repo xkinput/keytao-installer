@@ -47,8 +47,13 @@
           packages = [
             androidSdk
             pkgs.jdk17
+            pkgs.curl
+            pkgs.file
+            pkgs.unzip
+            pkgs.patchelf
             pkgs.pkg-config
             pkgs.sccache
+            pkgs.squashfsTools
             pkgs.mold
           ];
 
@@ -112,6 +117,32 @@
               openssl
               libsoup_3
               xdotool
+              libayatana-appindicator
+            ]
+          );
+
+          # Allow NixOS to run Tauri's downloaded glibc-linked AppRun/linuxdeploy
+          # binaries directly from the dev shell.
+          NIX_LD = pkgs.stdenv.cc.bintools.dynamicLinker;
+          NIX_LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath (
+            with pkgs;
+            [
+              stdenv.cc.cc.lib
+              zlib
+              glibc
+              fuse3
+              xorg.libX11
+              xorg.libxcb
+              libxkbcommon
+              wayland
+              glib
+              gtk3
+              webkitgtk_4_1
+              libsoup_3
+              librsvg
+              cairo
+              pango
+              harfbuzz
               libayatana-appindicator
             ]
           );

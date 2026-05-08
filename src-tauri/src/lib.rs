@@ -1343,6 +1343,11 @@ async fn rime_deploy_default(app: AppHandle) -> Result<DeployResult, String> {
     match tokio::task::spawn_blocking(move || keytao_core::deploy(user, shared)).await {
         Ok(Ok(())) => {
             let _ = app.emit("deploy-progress", "部署完成");
+            // Refresh the test-input Rime session so the new schemas take effect immediately.
+            if let Ok(engine) = keytao_core::Engine::new() {
+                let state: tauri::State<rime::RimeEngine> = app.state();
+                *state.engine.lock().unwrap() = Some(engine);
+            }
             Ok(DeployResult {
                 success: true,
                 message: "部署成功".into(),

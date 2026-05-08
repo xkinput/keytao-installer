@@ -642,7 +642,13 @@ impl App {
                     if let Err(e) = deploy(user, shared) {
                         tracing::error!("redeploy failed: {e}");
                     } else {
-                        tracing::info!("redeployed via tray");
+                        match Engine::new() {
+                            Ok(new_engine) => {
+                                self.engine = new_engine;
+                                tracing::info!("redeployed and engine session restarted via tray");
+                            }
+                            Err(e) => tracing::error!("engine restart failed after redeploy: {e}"),
+                        }
                     }
                 }
             }

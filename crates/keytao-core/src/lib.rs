@@ -50,28 +50,28 @@ mod desktop {
     };
     use std::sync::OnceLock;
 
-    // Deployment runs exactly once per process; further calls return the cached result.
-    static RIME_INIT: OnceLock<Result<(), String>> = OnceLock::new();
+    // librime setup+initialize must run exactly once per process.
+    static RIME_INITED: OnceLock<()> = OnceLock::new();
 
     /// Initialize and fully deploy librime.
+    /// `setup` + `initialize` run only on the first call; subsequent calls only
+    /// re-run `full_deploy_and_wait` so that newly installed schemas are picked up.
     /// Blocking — run inside `tokio::task::spawn_blocking` when called from async code.
     pub fn deploy(user_data_dir: String, shared_data_dir: String) -> Result<(), String> {
-        RIME_INIT
-            .get_or_init(|| {
-                let mut traits = Traits::new();
-                traits.set_user_data_dir(&user_data_dir);
-                traits.set_shared_data_dir(&shared_data_dir);
-                traits.set_distribution_name("KeyTao");
-                traits.set_distribution_code_name("keytao");
-                traits.set_distribution_version("1.0.0");
-                setup(&mut traits);
-                initialize(&mut traits);
-                match full_deploy_and_wait() {
-                    DeployResult::Success => Ok(()),
-                    DeployResult::Failure => Err("Rime deployment failed".to_string()),
-                }
-            })
-            .clone()
+        RIME_INITED.get_or_init(|| {
+            let mut traits = Traits::new();
+            traits.set_user_data_dir(&user_data_dir);
+            traits.set_shared_data_dir(&shared_data_dir);
+            traits.set_distribution_name("KeyTao");
+            traits.set_distribution_code_name("keytao");
+            traits.set_distribution_version("1.0.0");
+            setup(&mut traits);
+            initialize(&mut traits);
+        });
+        match full_deploy_and_wait() {
+            DeployResult::Success => Ok(()),
+            DeployResult::Failure => Err("Rime deployment failed".to_string()),
+        }
     }
 
     /// An active rime input session.

@@ -103,6 +103,26 @@ interface DeployStep {
   error?: boolean
 }
 
+interface ImeState {
+  preedit: string
+  candidates: Array<{ text: string; comment: string | null }>
+  committed: string | null
+}
+
+const X11_SPECIAL: Record<string, number> = {
+  Backspace: 0xff08, Tab: 0xff09, Enter: 0xff0d, Escape: 0xff1b,
+  ArrowLeft: 0xff51, ArrowUp: 0xff52, ArrowRight: 0xff53, ArrowDown: 0xff54,
+  Delete: 0xffff, Home: 0xff50, End: 0xff57, PageUp: 0xff55, PageDown: 0xff56,
+}
+function keyToSym(e: KeyboardEvent): number {
+  if (e.key in X11_SPECIAL) return X11_SPECIAL[e.key]
+  if (e.key.length === 1) return e.key.charCodeAt(0)
+  return 0
+}
+function modMask(e: KeyboardEvent): number {
+  return (e.shiftKey ? 0x0001 : 0) | (e.ctrlKey ? 0x0004 : 0) | (e.altKey ? 0x0008 : 0)
+}
+
 function safUriToDisplayPath(uri: string): string {
   try {
     const treeId = decodeURIComponent(uri.split("/tree/")[1] || "")
@@ -191,6 +211,12 @@ export default function App() {
   const [isInstalling, setIsInstalling] = useState(false)
   const [installProgress, setInstallProgress] = useState<InstallProgress | null>(null)
   const [installError, setInstallError] = useState<string | null>(null)
+
+  // Test input box
+  const [testOutput, setTestOutput] = useState("")
+  const [testPreedit, setTestPreedit] = useState("")
+  const [testCandidates, setTestCandidates] = useState<Array<{ text: string; comment: string | null }>>([])
+  const [isRimeReady, setIsRimeReady] = useState(false)
 
   // Deploy
   const [isDeploying, setIsDeploying] = useState(false)

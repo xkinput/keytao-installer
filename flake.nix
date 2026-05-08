@@ -44,8 +44,8 @@
       let
         version = ".alpha.0.1";
 
-        keytaoInstallerPkg = pkgs.stdenv.mkDerivation {
-          pname = "keytao-installer";
+        binaryPkg = pkgs.stdenv.mkDerivation {
+          pname = "keytao-installer-bin";
           inherit version;
 
           src = pkgs.fetchurl {
@@ -54,39 +54,41 @@
           };
 
           dontUnpack = true;
-
-          nativeBuildInputs = [
-            pkgs.autoPatchelfHook
-            pkgs.makeWrapper
-          ];
-
-          buildInputs = with pkgs; [
-            webkitgtk_4_1
-            gtk3
-            glib
-            gdk-pixbuf
-            pango
-            atk
-            cairo
-            harfbuzz
-            libayatana-appindicator
-            librime
-            openssl
-            dbus
-            xdotool
-            xz
-            libxkbcommon
-            libsoup_3
-            xorg.libX11
-            xorg.libxcb
-            wayland
-          ];
+          dontPatchELF = true;
+          dontFixup = true;
 
           installPhase = ''
             mkdir -p $out/bin
             tar -xzf $src -C $out/bin
             chmod +x $out/bin/keytao-installer
           '';
+        };
+
+        keytaoInstallerPkg = pkgs.buildFHSEnv {
+          name = "keytao-installer";
+          targetPkgs =
+            p: with p; [
+              webkitgtk_4_1
+              gtk3
+              glib
+              gdk-pixbuf
+              pango
+              atk
+              cairo
+              harfbuzz
+              libayatana-appindicator
+              librime
+              openssl
+              dbus
+              xdotool
+              xz
+              libxkbcommon
+              libsoup_3
+              xorg.libX11
+              xorg.libxcb
+              wayland
+            ];
+          runScript = "${binaryPkg}/bin/keytao-installer";
         };
       in
       {

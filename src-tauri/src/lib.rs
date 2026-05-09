@@ -326,49 +326,6 @@ fn parse_schema_list(content: &str) -> Vec<String> {
     schemas
 }
 
-fn extract_lua_require(line: &str) -> Option<String> {
-    let pos = line.find("require")?;
-    let after = line[pos + 7..].trim_start();
-    if !after.starts_with('(') {
-        return None;
-    }
-    let after = after[1..].trim_start();
-    let quote = after.chars().next()?;
-    if quote != '"' && quote != '\'' {
-        return None;
-    }
-    let content = &after[1..];
-    let end = content.find(quote)?;
-    Some(content[..end].to_string())
-}
-
-fn parse_rime_lua_requires(content: &str) -> Vec<String> {
-    let mut requires = Vec::new();
-    let mut in_block_comment = false;
-    for line in content.lines() {
-        let t = line.trim();
-        if in_block_comment {
-            if t.contains("--]]") {
-                in_block_comment = false;
-            }
-            continue;
-        }
-        if t.starts_with("--[[") {
-            in_block_comment = true;
-            continue;
-        }
-        if t.starts_with("--") || t.is_empty() {
-            continue;
-        }
-        if let Some(module) = extract_lua_require(t) {
-            if !requires.contains(&module) {
-                requires.push(module);
-            }
-        }
-    }
-    requires
-}
-
 // Returns (merged_rime_lua, renames) where renames is [(old_module, new_module)].
 // Conflicting user modules are renamed to "<name>_user" to avoid overwrite by zip's lua files.
 fn merge_rime_lua(
@@ -376,99 +333,21 @@ fn merge_rime_lua(
     zip_content: &str,
     zip_lua_filenames: &std::collections::HashSet<String>,
 ) -> (String, Vec<(String, String)>) {
-    use std::collections::HashSet;
-    let zip_requires: HashSet<String> = parse_rime_lua_requires(zip_content).into_iter().collect();
-    let mut renames: Vec<(String, String)> = Vec::new();
-    let mut extra_lines: Vec<String> = Vec::new();
-    let mut in_block_comment = false;
-
-    for line in local_content.lines() {
-        let t = line.trim();
-        if in_block_comment {
-            if t.contains("--]]") {
-                in_block_comment = false;
-            }
-            continue;
-        }
-        if t.starts_with("--[[") {
-            in_block_comment = true;
-            continue;
-        }
-        if t.is_empty() || t.starts_with("--") {
-            continue;
-        }
-        if let Some(module) = extract_lua_require(t) {
-            if zip_requires.contains(&module) {
-                continue;
-            }
-            let lua_filename = format!("{}.lua", module);
-            if zip_lua_filenames.contains(&lua_filename) {
-                let new_name = format!("{}_user", module);
-                let new_line = line
-                    .replace(&format!("\"{}\"", module), &format!("\"{}\"", new_name))
-                    .replace(&format!("'{}'", module), &format!("'{}'", new_name));
-                renames.push((module, new_name));
-                extra_lines.push(new_line);
-            } else {
-                extra_lines.push(line.to_string());
-            }
-        } else {
-            extra_lines.push(line.to_string());
-        }
-    }
-
-    let mut merged = zip_content.to_string();
-    if !extra_lines.is_empty() {
-        if !merged.ends_with('\n') {
-            merged.push('\n');
-        }
-        for line in &extra_lines {
-            merged.push_str(line);
-            merged.push('\n');
-        }
-    }
-
-    (merged, renames)
+    keytao_core::merge_rime_lua_content(Some(local_content), zip_content, zip_lua_filenames)
 }
 
 fn merge_default_custom(existing: Option<&str>, zip_content: &str) -> (String, Vec<String>) {
-    let keytao: Vec<String> = parse_schema_list(zip_content)
-        .into_iter()
-        .filter(|s| s.starts_with("keytao"))
-        .collect();
-    let user: Vec<String> = existing
-        .map(|c| {
-            parse_schema_list(c)
-                .into_iter()
-                .filter(|s| !s.starts_with("keytao"))
-                .collect()
-        })
-        .unwrap_or_default();
-    let all: Vec<String> = user.iter().chain(keytao.iter()).cloned().collect();
-
-    let mut out = String::new();
-    let mut in_list = false;
-    for line in zip_content.lines() {
-        let t = line.trim();
-        if !in_list {
-            out.push_str(line);
-            out.push('\n');
-            if t.contains("schema_list:") {
-                in_list = true;
-                for s in &all {
-                    out.push_str(&format!("    - schema: {s}\n"));
-                }
-            }
-        } else if t.starts_with("- schema:") {
-            // skip original entries
-        } else {
-            in_list = false;
-            out.push_str(line);
-            out.push('\n');
-        }
-    }
-
-    (out, user)
+    keytao_core::merge_default_custom_content(existing, zip_content).unwrap_or_else(|_| {
+        let user: Vec<String> = existing
+            .map(|c| {
+                parse_schema_list(c)
+                    .into_iter()
+                    .filter(|s| !s.starts_with("keytao"))
+                    .collect()
+            })
+            .unwrap_or_default();
+        (zip_content.to_string(), user)
+    })
 }
 
 /// After extraction, verify key files were written correctly.
@@ -480,7 +359,6 @@ fn verify_install(
     expected_rl: Option<&str>,
     zip_bytes: &[u8],
 ) -> Vec<VerifyEntry> {
-    use std::io::Read;
     let mut entries: Vec<VerifyEntry> = Vec::new();
 
     // Verify default.custom.yaml content matches what we wrote
@@ -1284,6 +1162,79 @@ pub struct LocalSchemaInfo {
     pub schemas: Vec<String>,
 }
 
+#[derive(Serialize, Clone)]
+pub struct ComponentVersions {
+    pub app_version: String,
+    pub tauri_version: String,
+    pub librime_version: Option<String>,
+    pub opencc_version: Option<String>,
+    pub data_dir: Option<String>,
+}
+
+fn command_version(command: &str, args: &[&str]) -> Option<String> {
+    let output = std::process::Command::new(command)
+        .args(args)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8(output.stdout).ok()?;
+    let value = text.trim();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_string())
+    }
+}
+
+fn nix_store_package_version(package: &str) -> Option<String> {
+    let entries = std::fs::read_dir("/nix/store").ok()?;
+    entries
+        .filter_map(|entry| entry.ok())
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .filter(|name| !name.ends_with(".drv"))
+        .filter_map(|name| {
+            let marker = format!("-{package}-");
+            let version = name.split_once(&marker)?.1.to_string();
+            Some(version)
+        })
+        .max()
+}
+
+fn librime_version() -> Option<String> {
+    command_version("pkg-config", &["--modversion", "rime"]).or_else(|| {
+        std::env::var("RIME_LIB_DIR").ok().and_then(|path| {
+            let marker = "-librime-";
+            let version = path.split_once(marker)?.1.split('/').next()?.to_string();
+            if version.is_empty() {
+                None
+            } else {
+                Some(version)
+            }
+        })
+    })
+}
+
+fn opencc_version() -> Option<String> {
+    ["opencc", "libopencc", "OpenCC"]
+        .iter()
+        .find_map(|name| command_version("pkg-config", &["--modversion", name]))
+        .or_else(|| command_version("opencc", &["--version"]))
+        .or_else(|| nix_store_package_version("opencc"))
+}
+
+#[tauri::command]
+fn get_component_versions(app: AppHandle) -> ComponentVersions {
+    ComponentVersions {
+        app_version: app.package_info().version.to_string(),
+        tauri_version: tauri::VERSION.to_string(),
+        librime_version: librime_version(),
+        opencc_version: opencc_version(),
+        data_dir: keytao_core::default_user_data_dir().map(|p| p.to_string_lossy().into_owned()),
+    }
+}
+
 #[tauri::command]
 fn check_local_schema(path: Option<String>) -> LocalSchemaInfo {
     let dir: Option<PathBuf> = path.map(PathBuf::from).or_else(|| {
@@ -1537,6 +1488,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             check_installer_update,
             fetch_latest_release,
+            get_component_versions,
             select_directory,
             download_to_temp,
             list_dir,
@@ -1589,21 +1541,21 @@ mod tests {
     #[test]
     fn test_parse_requires_basic() {
         let content = "keytao_filter = require(\"keytao_filter\")\nfoo = require('bar')\n";
-        let r = parse_rime_lua_requires(content);
+        let r = keytao_core::parse_rime_lua_requires(content);
         assert_eq!(r, vec!["keytao_filter", "bar"]);
     }
 
     #[test]
     fn test_parse_requires_skips_single_line_comments() {
         let content = "-- foo = require(\"foo\")\nreal = require(\"real\")\n";
-        let r = parse_rime_lua_requires(content);
+        let r = keytao_core::parse_rime_lua_requires(content);
         assert_eq!(r, vec!["real"]);
     }
 
     #[test]
     fn test_parse_requires_skips_block_comment_content() {
         let content = "--[[\n  foo = require(\"bar\")\n--]]\nreal = require(\"real\")\n";
-        let r = parse_rime_lua_requires(content);
+        let r = keytao_core::parse_rime_lua_requires(content);
         assert_eq!(r, vec!["real"]);
     }
 
@@ -1777,7 +1729,7 @@ mod tests {
     #[test]
     fn test_parse_requires_keytao_rime_lua() {
         // Block comment contains `foo = require("bar")` which must NOT be included.
-        let requires = parse_rime_lua_requires(KEYTAO_RIME_LUA);
+        let requires = keytao_core::parse_rime_lua_requires(KEYTAO_RIME_LUA);
         assert_eq!(
             requires,
             vec![

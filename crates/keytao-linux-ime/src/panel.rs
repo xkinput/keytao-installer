@@ -129,9 +129,12 @@ impl PanelRenderer {
 
         // Candidates
         let mut x = PADDING;
+        let selected_index = state
+            .highlighted_candidate_index
+            .min(state.candidates.len().saturating_sub(1));
         for (i, cand) in state.candidates.iter().enumerate() {
             let label = format!("{}. ", i + 1);
-            let color = if i == 0 { ACCENT } else { FG };
+            let color = if i == selected_index { ACCENT } else { FG };
             self.draw_text(&mut pm, &label, x, cand_y, DIM, FONT_SIZE);
             x += self.text_width(&label, FONT_SIZE);
             self.draw_text(&mut pm, &cand.text, x, cand_y, color, FONT_SIZE);

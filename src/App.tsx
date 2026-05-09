@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core"
 import { getVersion } from "@tauri-apps/api/app"
 import { listen } from "@tauri-apps/api/event"
 import { platform } from "@tauri-apps/plugin-os"
+import { openPath } from "@tauri-apps/plugin-opener"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Progress } from "@/components/ui/progress"
@@ -33,7 +34,7 @@ import {
 } from "lucide-react"
 
 type OSType = "windows" | "macos" | "linux" | "android" | "ios" | "unknown"
-type Tab = "install" | "extension"
+type Tab = "install" | "extension" | "about"
 
 interface InstallerUpdateInfo {
   current_version: string
@@ -103,24 +104,12 @@ interface DeployStep {
   error?: boolean
 }
 
-interface ImeState {
-  preedit: string
-  candidates: Array<{ text: string; comment: string | null }>
-  committed: string | null
-}
-
-const X11_SPECIAL: Record<string, number> = {
-  Backspace: 0xff08, Tab: 0xff09, Enter: 0xff0d, Escape: 0xff1b,
-  ArrowLeft: 0xff51, ArrowUp: 0xff52, ArrowRight: 0xff53, ArrowDown: 0xff54,
-  Delete: 0xffff, Home: 0xff50, End: 0xff57, PageUp: 0xff55, PageDown: 0xff56,
-}
-function keyToSym(e: KeyboardEvent): number {
-  if (e.key in X11_SPECIAL) return X11_SPECIAL[e.key]
-  if (e.key.length === 1) return e.key.charCodeAt(0)
-  return 0
-}
-function modMask(e: KeyboardEvent): number {
-  return (e.shiftKey ? 0x0001 : 0) | (e.ctrlKey ? 0x0004 : 0) | (e.altKey ? 0x0008 : 0)
+interface ComponentVersions {
+  app_version: string
+  tauri_version: string
+  librime_version: string | null
+  opencc_version: string | null
+  data_dir: string | null
 }
 
 function safUriToDisplayPath(uri: string): string {
@@ -206,17 +195,13 @@ export default function App() {
   // Local schema info
   const [localSchemaInfo, setLocalSchemaInfo] = useState<LocalSchemaInfo | null>(null)
   const [isCheckingLocal, setIsCheckingLocal] = useState(false)
+  const [isOpeningDir, setIsOpeningDir] = useState(false)
+  const [componentVersions, setComponentVersions] = useState<ComponentVersions | null>(null)
 
   // Install (default dir)
   const [isInstalling, setIsInstalling] = useState(false)
   const [installProgress, setInstallProgress] = useState<InstallProgress | null>(null)
   const [installError, setInstallError] = useState<string | null>(null)
-
-  // Test input box
-  const [testOutput, setTestOutput] = useState("")
-  const [testPreedit, setTestPreedit] = useState("")
-  const [testCandidates, setTestCandidates] = useState<Array<{ text: string; comment: string | null }>>([])
-  const [isRimeReady, setIsRimeReady] = useState(false)
 
   // Deploy
   const [isDeploying, setIsDeploying] = useState(false)
@@ -275,6 +260,10 @@ export default function App() {
       .then(setLocalSchemaInfo)
       .catch(() => { })
 
+    invoke<ComponentVersions>("get_component_versions")
+      .then(setComponentVersions)
+      .catch(() => { })
+
     if (os === "macos") {
       invoke<{ installed: boolean }>("macos_ime_status")
         .then((s) => setImeInstalled(s.installed))
@@ -303,6 +292,18 @@ export default function App() {
       setLocalSchemaInfo(info)
     } catch { }
     finally { setIsCheckingLocal(false) }
+  }
+
+  async function handleOpenDefaultDir() {
+    if (!defaultDir) return
+    setIsOpeningDir(true)
+    try {
+      await openPath(defaultDir)
+    } catch (e) {
+      addLogs([`[OPEN DIR ERROR] ${String(e)}`])
+    } finally {
+      setIsOpeningDir(false)
+    }
   }
 
   async function handleDeploy() {
@@ -551,6 +552,7 @@ export default function App() {
           {([
             { id: "install", label: "安装", icon: Download },
             { id: "extension", label: "扩展", icon: Settings },
+            { id: "about", label: "关于", icon: Info },
           ] as const).map(({ id, label, icon: Icon }) => (
             <button
               key={id}
@@ -695,6 +697,16 @@ export default function App() {
                       <RefreshCw className={`h-3.5 w-3.5 ${isCheckingLocal ? "animate-spin" : ""}`} />
                       检查本地
                     </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={handleOpenDefaultDir}
+                      disabled={!defaultDir || isOpeningDir || isBusy}
+                      className="gap-1.5"
+                    >
+                      <FolderOpen className="h-3.5 w-3.5" />
+                      {isOpeningDir ? "打开中..." : "打开目录"}
+                    </Button>
                     <Button variant="outline" size="sm" onClick={handleDeploy} disabled={isBusy} className="gap-1.5">
                       <Play className="h-3.5 w-3.5" />
                       部署
@@ -810,6 +822,37 @@ export default function App() {
                   </details>
                 </div>
               )}
+            </CardContent>
+          </Card>
+        )}
+
+        {activeTab === "about" && (
+          <Card>
+            <CardHeader className="pb-3">
+              <CardTitle className="text-sm font-semibold flex items-center gap-2">
+                <Info className="h-4 w-4 text-muted-foreground" />
+                关于
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              <div className="rounded-lg border border-border overflow-hidden">
+                {[
+                  ["安装器版本", componentVersions?.app_version ?? (appVersion || "unknown")],
+                  ["Tauri 版本", componentVersions?.tauri_version ?? "unknown"],
+                  ["librime 版本", componentVersions?.librime_version ?? "unknown"],
+                  ["OpenCC 版本", componentVersions?.opencc_version ?? "unknown"],
+                  ["平台", osType],
+                  ["键道目录", componentVersions?.data_dir ?? defaultDir ?? "unknown"],
+                ].map(([label, value]) => (
+                  <div key={label} className="flex items-start justify-between gap-4 px-3 py-2 border-b border-border last:border-0">
+                    <span className="text-sm text-muted-foreground shrink-0">{label}</span>
+                    <code className="text-xs font-mono text-right break-all">{value}</code>
+                  </div>
+                ))}
+              </div>
+              <p className="text-xs text-muted-foreground">
+                用户目录只应保留 `default.custom.yaml` 这类补丁文件。如果后续仍有 deploy 相关报错，应该检查共享数据是否缺少基础 preset，而不是再往用户目录补 `default.yaml`。
+              </p>
             </CardContent>
           </Card>
         )}

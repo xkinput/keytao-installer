@@ -6,6 +6,7 @@ description = "Platform-agnostic librime engine wrapper for KeyTao IME"
 
 [dependencies]
 serde = { workspace = true }
+serde_yaml = "0.9"
 dirs = { workspace = true }
 
 # librime is only available on desktop targets

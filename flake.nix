@@ -5,7 +5,7 @@
   };
 
   outputs =
-    { nixpkgs, flake-utils, ... }:
+    { self, nixpkgs, flake-utils, ... }:
     flake-utils.lib.eachDefaultSystem (
       system:
       let
@@ -64,7 +64,7 @@
           '';
         };
 
-        keytaoInstallerPkg = pkgs.buildFHSEnv {
+        fhsEnv = pkgs.buildFHSEnv {
           name = "keytao-installer";
           targetPkgs =
             p: with p; [
@@ -89,6 +89,29 @@
               wayland
             ];
           runScript = "${binaryPkg}/bin/keytao-installer";
+        };
+
+        desktopItem = pkgs.makeDesktopItem {
+          name = "keytao-installer";
+          exec = "keytao-installer %U";
+          icon = "keytao-installer";
+          desktopName = "键道安装器";
+          comment = "Keytao IME installer";
+          categories = [ "Utility" ];
+        };
+
+        iconPkg = pkgs.runCommand "keytao-installer-icon" { } ''
+          mkdir -p $out/share/icons/hicolor/256x256/apps
+          cp ${self}/public/logo.png $out/share/icons/hicolor/256x256/apps/keytao-installer.png
+        '';
+
+        keytaoInstallerPkg = pkgs.symlinkJoin {
+          name = "keytao-installer";
+          paths = [
+            fhsEnv
+            desktopItem
+            iconPkg
+          ];
         };
       in
       {

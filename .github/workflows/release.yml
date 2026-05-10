@@ -3,7 +3,7 @@ name: Release
 on:
   push:
     tags:
-      - 'v[0-9]+.[0-9]+.[0-9]+'
+      - 'v*'
 
 permissions:
   contents: write
@@ -27,7 +27,7 @@ jobs:
               name: tag,
               generate_release_notes: true,
               draft: false,
-              prerelease: false,
+              prerelease: tag.includes('alpha'),
             })
             return data.id
 

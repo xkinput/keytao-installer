@@ -47,7 +47,7 @@
         androidSdk = androidComposition.androidsdk;
       in
       let
-        version = "0.0.2-alpha";
+        version = "0.0.3-alpha";
 
         binaryPkg = pkgs.stdenv.mkDerivation {
           pname = "keytao-installer-bin";
@@ -55,7 +55,7 @@
 
           src = pkgs.fetchurl {
             url = "https://github.com/xkinput/keytao-installer/releases/download/v${version}/keytao-installer-${version}-linux-x86_64.tar.gz";
-            hash = "sha256-i3460B9grDWD+QkqsqbxR+qnme2zSSjjvZ68ldy1ijE=";
+            hash = pkgs.lib.fakeHash;
           };
 
           dontUnpack = true;
@@ -119,8 +119,30 @@
           ];
         };
       in
+      let
+        keytaoLinuxIme = pkgs.rustPlatform.buildRustPackage {
+          pname = "keytao-linux-ime";
+          version = "0.1.0";
+          src = pkgs.lib.cleanSource ./.;
+          cargoLock.lockFile = ./Cargo.lock;
+          cargoBuildFlags = [
+            "--package"
+            "keytao-linux-ime"
+          ];
+          nativeBuildInputs = with pkgs; [ pkg-config ];
+          buildInputs = with pkgs; [
+            librime
+            libxkbcommon
+            xorg.libxcb
+            xorg.libX11
+          ];
+          RIME_INCLUDE_DIR = "${pkgs.librime}/include";
+          RIME_LIB_DIR = "${pkgs.librime}/lib";
+        };
+      in
       {
         packages.default = keytaoInstallerPkg;
+        packages.keytao-linux-ime = keytaoLinuxIme;
 
         apps.default = {
           type = "app";
@@ -287,6 +309,8 @@
                                     # Embed RPATH for all runtime libs so binaries work without LD_LIBRARY_PATH.
                                     # The -L flags are injected via NIX_LDFLAGS by mkShell; here we add -rpath
                                     # so the dynamic linker finds the libs at runtime even outside the shell.
+                                    # Note: Rust on Linux defaults to lld (-fuse-ld=lld via gcc-ld wrapper),
+                                    # so no explicit linker selection is needed here.
                                     export RUSTFLAGS="-C link-arg=-Wl,-rpath,${
                                       pkgs.lib.makeLibraryPath (
                                         with pkgs;
@@ -310,7 +334,7 @@
                                           libayatana-appindicator
                                         ]
                                       )
-                                    } -C link-arg=-fuse-ld=mold"
+                                    }"
                                     # Install Android Rust cross-compilation targets (idempotent)
                                     for _t in aarch64-linux-android armv7-linux-androideabi i686-linux-android x86_64-linux-android; do
                                       rustup target add "$_t" 2>/dev/null || true

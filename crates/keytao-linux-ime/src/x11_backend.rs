@@ -285,12 +285,31 @@ impl ServerHandler<MyServer> for KeyTaoHandler {
 // ── Entry point ───────────────────────────────────────────────────────────────
 
 pub fn run(engine: CoreEngine) {
-    let (conn, screen_num) = XCBConnection::connect(None).expect("X11 connection");
+    // XWayland starts lazily in niri: DISPLAY may be set in the environment but
+    // the actual server socket may not exist yet.  Retry until it is available.
+    let (conn, screen_num) = loop {
+        match XCBConnection::connect(None) {
+            Ok(pair) => break pair,
+            Err(e) => {
+                tracing::debug!(
+                    "X11 connect failed ({e}), retrying in 1 s (XWayland not ready yet?)"
+                );
+                std::thread::sleep(std::time::Duration::from_secs(1));
+            }
+        }
+    };
     let conn = Arc::new(conn);
 
-    let mut server = X11rbServer::init(Arc::clone(&conn), screen_num, "keytao", xim::ALL_LOCALES)
-        .expect("XIM server init — is another XIM server already running?");
+    let server = match X11rbServer::init(Arc::clone(&conn), screen_num, "keytao", xim::ALL_LOCALES)
+    {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!("XIM server init failed: {e} (another XIM server named 'keytao' may already be running)");
+            return;
+        }
+    };
 
+    let mut server = server;
     let mut connections = XimConnections::new();
     let mut handler = KeyTaoHandler::new(engine, Arc::clone(&conn), screen_num);
 

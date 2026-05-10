@@ -38,10 +38,26 @@ fn main() {
         }
         tracing::info!("librime ready");
 
-        if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+        let has_wayland = std::env::var_os("WAYLAND_DISPLAY").is_some();
+        let has_x11 = std::env::var_os("DISPLAY").is_some();
+
+        if has_wayland && has_x11 {
+            // Wayland session with XWayland: run both backends concurrently.
+            // The X11/XIM backend serves XWayland apps (e.g. WeChat) that cannot
+            // use zwp_input_method_v2 because they fall back to xcb/XIM.
+            // CoreEngine is Arc<Mutex<...>> so it is safe to share across threads.
+            tracing::info!("display server: Wayland + XWayland — running both backends");
+            let engine_xim = engine.clone();
+            std::thread::spawn(move || {
+                tracing::info!("X11/XIM backend started for XWayland apps");
+                x11_backend::run(engine_xim);
+                tracing::warn!("X11/XIM backend exited");
+            });
+            wayland_backend::run(engine);
+        } else if has_wayland {
             tracing::info!("display server: Wayland");
             wayland_backend::run(engine);
-        } else if std::env::var_os("DISPLAY").is_some() {
+        } else if has_x11 {
             tracing::info!("display server: X11");
             x11_backend::run(engine);
         } else {

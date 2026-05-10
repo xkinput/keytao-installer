@@ -1,7 +1,4 @@
 [build]
-# Use mold for fast linking on Linux
-rustflags = ["-C", "link-arg=-fuse-ld=mold"]
-
 [profile.dev]
 debug = 1
 

@@ -46,6 +46,12 @@ struct KeyTaoHandler {
     panel_win: Window,
     gc: Gcontext,
     panel_visible: bool,
+    // Keycode → keysym table fetched from the X11 server at init time.
+    // Layout: flat array, each keycode has `keysyms_per_keycode` slots.
+    // keysym index 0 = unshifted, 1 = shifted.
+    keycode_map: Vec<u32>,
+    min_keycode: u8,
+    keysyms_per_keycode: u8,
 }
 
 impl KeyTaoHandler {
@@ -90,6 +96,27 @@ impl KeyTaoHandler {
         conn.create_gc(gc, panel_win, &Default::default()).ok();
         conn.flush().ok();
 
+        // Fetch keycode→keysym mapping from the X11 server.
+        // This lets us convert raw XIM keycodes to keysyms without needing XKB.
+        let setup = conn.setup();
+        let min_keycode = setup.min_keycode;
+        let max_keycode = setup.max_keycode;
+        let count = (max_keycode - min_keycode) as u8 + 1;
+
+        let (keycode_map, keysyms_per_keycode) = conn
+            .get_keyboard_mapping(min_keycode, count)
+            .ok()
+            .and_then(|cookie| cookie.reply().ok())
+            .map(|reply| {
+                let kpk = reply.keysyms_per_keycode;
+                let syms: Vec<u32> = reply.keysyms.iter().map(|&s| s).collect();
+                (syms, kpk)
+            })
+            .unwrap_or_else(|| {
+                tracing::warn!("GetKeyboardMapping failed; keysym lookup disabled");
+                (Vec::new(), 1)
+            });
+
         Self {
             engine,
             renderer,
@@ -97,6 +124,9 @@ impl KeyTaoHandler {
             panel_win,
             gc,
             panel_visible: false,
+            keycode_map,
+            min_keycode,
+            keysyms_per_keycode,
         }
     }
 
@@ -242,17 +272,33 @@ impl ServerHandler<MyServer> for KeyTaoHandler {
         user_ic: &mut UserInputContext<IcData>,
         xev: &x11rb::protocol::xproto::KeyPressEvent,
     ) -> Result<bool, ServerError> {
-        // xev.detail is the raw X11 keycode. librime expects X11 keysyms, but
-        // XIM routes events after the server-side keymap has been applied, so
-        // the keycode here is still a hardware scancode offset by 8.
-        // Passing the raw keycode works for ASCII letters (keycodes 10–35 map
-        // directly to 'a'–'z' in a standard US layout via librime's fallback).
-        // A complete implementation should use xkbcommon-x11 to load the
-        // server keymap and convert properly.
-        let keycode = xev.detail as u32;
+        // Convert the X11 hardware keycode to a keysym using the keyboard mapping
+        // fetched at init time.  xev.detail is the raw X11 keycode.
+        // Shift bit (bit 0) in xev.state selects between keysym index 0 (unshifted)
+        // and index 1 (shifted).
+        let shift = u32::from(xev.state) & 0x0001 != 0;
+        let keysym: u32 = if self.keycode_map.is_empty() {
+            xev.detail as u32 // fallback: broken, but better than crashing
+        } else {
+            let kc = xev.detail as usize;
+            let min = self.min_keycode as usize;
+            let kpk = self.keysyms_per_keycode as usize;
+            if kc >= min && kpk > 0 {
+                let base = (kc - min) * kpk;
+                let idx = if shift && kpk > 1 { base + 1 } else { base };
+                self.keycode_map.get(idx).copied().unwrap_or(0)
+            } else {
+                0
+            }
+        };
+
+        if keysym == 0 {
+            return Ok(false);
+        }
+
         let mods = u32::from(xev.state);
 
-        let ime_state = match self.engine.process_key(keycode, mods) {
+        let ime_state = match self.engine.process_key(keysym, mods) {
             Some(s) => s,
             None => return Ok(false),
         };

@@ -129,7 +129,7 @@
             "--package"
             "keytao-linux-ime"
           ];
-          nativeBuildInputs = with pkgs; [ pkg-config ];
+          nativeBuildInputs = with pkgs; [ pkg-config llvmPackages.libclang ];
           buildInputs = with pkgs; [
             librime
             libxkbcommon
@@ -138,6 +138,7 @@
           ];
           RIME_INCLUDE_DIR = "${pkgs.librime}/include";
           RIME_LIB_DIR = "${pkgs.librime}/lib";
+          LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
         };
       in
       {

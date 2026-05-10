@@ -35,3 +35,6 @@ fontdue = "0.9"
 
 # SHM pool helper (anonymous fd for Wayland shm)
 memmap2 = "0.9"
+
+# IBus D-Bus protocol for Chromium/CEF apps (e.g. WeChatAppEx)
+zbus = { version = "4", features = ["tokio"] }

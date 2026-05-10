@@ -298,14 +298,14 @@ impl ServerHandler<MyServer> for KeyTaoHandler {
 
         let mods = u32::from(xev.state);
 
-        let ime_state = match self.engine.process_key(keysym, mods) {
-            Some(s) => s,
+        let result = match self.engine.process_key_result(keysym, mods) {
+            Some(r) => r,
             None => return Ok(false),
         };
 
-        let consumed = ime_state.committed.is_some()
-            || !ime_state.preedit.is_empty()
-            || !ime_state.candidates.is_empty();
+        let ime_state = result.state;
+
+        let consumed = result.accepted;
 
         if let Some(text) = &ime_state.committed {
             server.commit(&user_ic.ic, text)?;

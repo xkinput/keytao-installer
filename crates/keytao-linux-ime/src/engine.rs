@@ -1,6 +1,8 @@
 //! Shared librime engine wrapper.
 
-use keytao_core::{default_shared_data_dir, default_user_data_dir, deploy, Engine, ImeState};
+use keytao_core::{
+    default_shared_data_dir, default_user_data_dir, deploy, Engine, ImeState, KeyProcessResult,
+};
 use std::sync::{Arc, Mutex};
 
 #[derive(Clone)]
@@ -28,6 +30,14 @@ impl CoreEngine {
             .unwrap()
             .as_ref()
             .map(|e| e.process_key(keycode, mask))
+    }
+
+    pub fn process_key_result(&self, keycode: u32, mask: u32) -> Option<KeyProcessResult> {
+        self.0
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|e| e.process_key_result(keycode, mask))
     }
 
     pub fn select_candidate(&self, index: usize) -> Option<ImeState> {

@@ -72,6 +72,52 @@ pub struct InstallResult {
 
 const API_BASE: &str = "https://keytao.rea.ink";
 
+#[cfg(target_os = "linux")]
+fn resolve_keytao_ime_command() -> (std::process::Command, String) {
+    if let Ok(path) = std::env::var("KEYTAO_IME_BIN") {
+        return (std::process::Command::new(&path), path);
+    }
+
+    if cfg!(debug_assertions) {
+        if let Ok(current_exe) = std::env::current_exe() {
+            let sibling = current_exe.with_file_name("keytao-ime");
+            if sibling.is_file() {
+                let display = sibling.display().to_string();
+                return (std::process::Command::new(&sibling), display);
+            }
+        }
+    }
+
+    (
+        std::process::Command::new("keytao-ime"),
+        "keytao-ime".to_string(),
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn is_same_keytao_ime_running(expected: &str) -> bool {
+    std::process::Command::new("pgrep")
+        .args(["-af", "keytao-ime"])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| {
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .any(|line| line.contains(expected))
+        })
+        .unwrap_or(false)
+}
+
+#[cfg(target_os = "linux")]
+fn is_any_keytao_ime_running() -> bool {
+    std::process::Command::new("pgrep")
+        .args(["-x", "keytao-ime"])
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
 fn build_client(app: &AppHandle) -> Result<reqwest::Client, String> {
     let version = app.package_info().version.to_string();
     reqwest::Client::builder()
@@ -1479,6 +1525,29 @@ pub fn run() {
                     });
 
                 ime::spawn(app.handle().clone(), tray_shared);
+
+                // Ensure keytao-ime is running for X11/XIM and IBus (WeChat etc.).
+                // Always remove WAYLAND_DISPLAY here so the standalone process does
+                // not register another zwp_input_method_v2 client and break global
+                // key handling. The Tauri app's embedded IME owns the Wayland path.
+                let (mut ime_cmd, ime_display) = resolve_keytao_ime_command();
+                let same_binary_running = is_same_keytao_ime_running(&ime_display);
+                let any_ime_running = is_any_keytao_ime_running();
+                if !any_ime_running {
+                    match ime_cmd.env_remove("WAYLAND_DISPLAY").spawn() {
+                        Ok(_) => tracing::info!("keytao-ime spawned from {ime_display}"),
+                        Err(e) => tracing::warn!(
+                            "keytao-ime failed to spawn from {ime_display}: {e}"
+                        ),
+                    }
+                } else if same_binary_running {
+                    tracing::info!("keytao-ime already running from {ime_display}");
+                } else {
+                    tracing::warn!(
+                        "a different keytao-ime is already running; expected {ime_display}. \
+                         Stop the existing IME if you want nr tauri dev to exercise the local binary."
+                    );
+                }
             }
 
             Ok(())

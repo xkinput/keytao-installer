@@ -30,6 +30,12 @@ pub struct Candidate {
     pub comment: Option<String>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct KeyProcessResult {
+    pub state: ImeState,
+    pub accepted: bool,
+}
+
 impl ImeState {
     pub fn empty() -> Self {
         Self {
@@ -66,7 +72,8 @@ fn rime_log_dir(user_data_dir: &Path) -> PathBuf {
 mod desktop {
     use super::*;
     use rime_api::{
-        create_session, full_deploy_and_wait, initialize, setup, DeployResult, KeyEvent, Traits,
+        create_session, full_deploy_and_wait, initialize, setup, DeployResult, KeyEvent, KeyStatus,
+        Traits,
     };
     use std::sync::OnceLock;
 
@@ -130,8 +137,15 @@ mod desktop {
         }
 
         pub fn process_key(&self, keycode: u32, mask: u32) -> ImeState {
-            self.session.process_key(KeyEvent::new(keycode, mask));
-            extract_state(&self.session)
+            self.process_key_result(keycode, mask).state
+        }
+
+        pub fn process_key_result(&self, keycode: u32, mask: u32) -> KeyProcessResult {
+            let status = self.session.process_key(KeyEvent::new(keycode, mask));
+            KeyProcessResult {
+                state: extract_state(&self.session),
+                accepted: matches!(status, KeyStatus::Accept),
+            }
         }
 
         pub fn select_candidate(&self, index: usize) -> ImeState {

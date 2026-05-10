@@ -3,6 +3,8 @@
 #[cfg(target_os = "linux")]
 mod engine;
 #[cfg(target_os = "linux")]
+mod ibus_backend;
+#[cfg(target_os = "linux")]
 mod panel;
 #[cfg(target_os = "linux")]
 mod wayland_backend;
@@ -42,16 +44,24 @@ fn main() {
         let has_x11 = std::env::var_os("DISPLAY").is_some();
 
         if has_wayland && has_x11 {
-            // Wayland session with XWayland: run both backends concurrently.
-            // The X11/XIM backend serves XWayland apps (e.g. WeChat) that cannot
-            // use zwp_input_method_v2 because they fall back to xcb/XIM.
-            // CoreEngine is Arc<Mutex<...>> so it is safe to share across threads.
-            tracing::info!("display server: Wayland + XWayland — running both backends");
+            // Wayland session with XWayland: run all three backends concurrently.
+            // - zwp_input_method_v2 for native Wayland apps
+            // - XIM for XWayland apps that use X11 input methods
+            // - IBus D-Bus for Chromium/CEF apps (e.g. WeChatAppEx) that use IBus
+            tracing::info!("display server: Wayland + XWayland — running all backends");
             let engine_xim = engine.clone();
             std::thread::spawn(move || {
                 tracing::info!("X11/XIM backend started for XWayland apps");
                 x11_backend::run(engine_xim);
                 tracing::warn!("X11/XIM backend exited");
+            });
+            let engine_ibus = engine.clone();
+            std::thread::spawn(move || {
+                tracing::info!("IBus D-Bus backend started for Chromium/CEF apps");
+                tokio::runtime::Runtime::new()
+                    .expect("tokio runtime")
+                    .block_on(ibus_backend::run(engine_ibus));
+                tracing::warn!("IBus D-Bus backend exited");
             });
             wayland_backend::run(engine);
         } else if has_wayland {
@@ -59,6 +69,15 @@ fn main() {
             wayland_backend::run(engine);
         } else if has_x11 {
             tracing::info!("display server: X11");
+            // Run IBus backend alongside XIM for X11-only sessions.
+            let engine_ibus = engine.clone();
+            std::thread::spawn(move || {
+                tracing::info!("IBus D-Bus backend started for Chromium/CEF apps");
+                tokio::runtime::Runtime::new()
+                    .expect("tokio runtime")
+                    .block_on(ibus_backend::run(engine_ibus));
+                tracing::warn!("IBus D-Bus backend exited");
+            });
             x11_backend::run(engine);
         } else {
             eprintln!("Neither WAYLAND_DISPLAY nor DISPLAY is set.");

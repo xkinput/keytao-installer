@@ -5,7 +5,7 @@
 //! The panel is rendered via CPU rasterization (tiny-skia + cosmic-text) into a SHM buffer.
 
 use std::{
-    fs::File,
+    fs::{File, OpenOptions},
     io::Write,
     os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd},
     path::PathBuf,
@@ -15,7 +15,9 @@ use std::{
 use cosmic_text::{Attrs, Buffer, FontSystem, Metrics, Shaping, SwashCache, SwashContent};
 use keytao_core::{default_shared_data_dir, default_user_data_dir, deploy, Engine, ImeState};
 use tauri::{AppHandle, Emitter};
-use tiny_skia::{Color, FillRule, Paint, PathBuilder, Pixmap, Rect, Stroke, Transform};
+use tiny_skia::{
+    Color, FillRule, Paint, PathBuilder, Pixmap, PremultipliedColorU8, Rect, Stroke, Transform,
+};
 use wayland_client::{
     delegate_noop,
     globals::{registry_queue_init, GlobalListContents},
@@ -59,6 +61,7 @@ const COMMENT_SIZE: f32 = 12.0;
 const PREEDIT_H: f32 = 26.0;
 const CELL_H: f32 = 32.0;
 const MAX_COLS: usize = 9;
+const DEACTIVATE_DEBOUNCE_MS: u64 = 180;
 
 /// Shared state read by the tray icon and written by the IME thread.
 pub struct TrayShared {
@@ -67,6 +70,45 @@ pub struct TrayShared {
 }
 
 pub type TrayArc = Arc<RwLock<TrayShared>>;
+
+const DIAG_LOG_PATH: &str = "/tmp/keytao-tauri-ime.log";
+const PANEL_DUMP_PATH: &str = "/tmp/keytao-tauri-panel.png";
+const PANEL_SHM_DUMP_PATH: &str = "/tmp/keytao-tauri-panel-shm.png";
+
+fn diag_log(message: &str) {
+    if let Ok(mut file) = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(DIAG_LOG_PATH)
+    {
+        let _ = writeln!(file, "{message}");
+    }
+}
+
+fn dump_panel_pixmap(pixmap: &Pixmap) {
+    if cfg!(debug_assertions) {
+        let _ = pixmap.save_png(PANEL_DUMP_PATH);
+    }
+}
+
+fn dump_shm_bgra_buffer(bgra: &[u8], w: i32, h: i32) {
+    if !cfg!(debug_assertions) {
+        return;
+    }
+    let Some(mut pixmap) = Pixmap::new(w as u32, h as u32) else {
+        return;
+    };
+    for (pixel, chunk) in pixmap.pixels_mut().iter_mut().zip(bgra.chunks_exact(4)) {
+        let b = chunk[0];
+        let g = chunk[1];
+        let r = chunk[2];
+        let a = chunk[3];
+        if let Some(color) = PremultipliedColorU8::from_rgba(r, g, b, a) {
+            *pixel = color;
+        }
+    }
+    let _ = pixmap.save_png(PANEL_SHM_DUMP_PATH);
+}
 
 fn preferred_user_dir() -> Option<PathBuf> {
     default_user_data_dir()
@@ -84,6 +126,8 @@ pub fn spawn(app: AppHandle, tray: TrayArc) {
 }
 
 fn init_and_run(app: AppHandle, tray: TrayArc) -> Result<(), Box<dyn std::error::Error>> {
+    let _ = std::fs::remove_file(DIAG_LOG_PATH);
+    diag_log("init_and_run");
     let user_dir = preferred_user_dir().ok_or("cannot determine keytao data directory")?;
     let user = user_dir.to_string_lossy().into_owned();
     let shared = default_shared_data_dir();
@@ -91,6 +135,7 @@ fn init_and_run(app: AppHandle, tray: TrayArc) -> Result<(), Box<dyn std::error:
     deploy(user, shared)?;
     let engine = Engine::new()?;
     tracing::info!("librime initialised");
+    diag_log("librime initialised");
     run_wayland(engine, tray, app)
 }
 
@@ -126,6 +171,8 @@ fn run_wayland(
         keyboard_grab: None,
         serial: 0,
         active: false,
+        pending_active: None,
+        deactivate_deadline: None,
         xkb_context: xkb::Context::new(xkb::CONTEXT_NO_FLAGS),
         xkb_keymap: None,
         xkb_state: None,
@@ -138,6 +185,7 @@ fn run_wayland(
         app_handle: app,
         ascii_mode: false,
         mode_hint_until: None,
+        last_panel_state: ImeState::empty(),
     };
 
     // Create virtual keyboard for forwarding keys the IME doesn't consume.
@@ -150,7 +198,21 @@ fn run_wayland(
     queue.roundtrip(&mut state)?;
 
     tracing::info!("Wayland IME running (native popup surface)");
+    diag_log("Wayland IME running");
     loop {
+        if state
+            .deactivate_deadline
+            .map_or(false, |t| std::time::Instant::now() >= t)
+        {
+            state.deactivate_deadline = None;
+            state.active = false;
+            state.keyboard_grab.take();
+            state.engine.reset();
+            state.hide_popup();
+            tracing::debug!("IME deactivated after debounce");
+            diag_log("debounce -> inactive");
+        }
+
         // Auto-hide mode hint after 3 seconds.
         if state
             .mode_hint_until
@@ -166,12 +228,13 @@ fn run_wayland(
         // Flush pending requests to the Wayland server.
         queue.flush()?;
 
-        // Poll: 100ms timeout while hint is active so the timer check fires promptly.
-        let timeout_ms: i32 = if state.mode_hint_until.is_some() {
-            100
-        } else {
-            -1
-        };
+        // Poll more frequently while any timer-driven state transition is pending.
+        let timeout_ms: i32 =
+            if state.mode_hint_until.is_some() || state.deactivate_deadline.is_some() {
+                100
+            } else {
+                -1
+            };
         let raw_fd = conn.as_fd().as_raw_fd();
         let mut pfd = libc::pollfd {
             fd: raw_fd,
@@ -197,6 +260,8 @@ struct App {
     keyboard_grab: Option<ZwpInputMethodKeyboardGrabV2>,
     serial: u32,
     active: bool,
+    pending_active: Option<bool>,
+    deactivate_deadline: Option<std::time::Instant>,
     xkb_context: xkb::Context,
     xkb_keymap: Option<xkb::Keymap>,
     xkb_state: Option<xkb::State>,
@@ -209,6 +274,7 @@ struct App {
     app_handle: AppHandle,
     ascii_mode: bool,
     mode_hint_until: Option<std::time::Instant>,
+    last_panel_state: ImeState,
 }
 
 impl App {
@@ -218,6 +284,7 @@ impl App {
     }
 
     fn create_popup(&mut self, qh: &QueueHandle<Self>) {
+        diag_log("create_popup");
         let surface = self.compositor.create_surface(qh, ());
         let proxy = self
             .input_method
@@ -235,6 +302,7 @@ impl App {
     }
 
     fn destroy_popup(&mut self) {
+        diag_log("destroy_popup");
         self.popup_buffer.take();
         if let Some(p) = self.popup_proxy.take() {
             p.destroy();
@@ -242,6 +310,15 @@ impl App {
         if let Some(s) = self.popup_surface.take() {
             s.destroy();
         }
+    }
+
+    fn hide_popup(&mut self) {
+        diag_log("hide_popup");
+        if let Some(surface) = &self.popup_surface {
+            surface.attach(None, 0, 0);
+            surface.commit();
+        }
+        self.popup_buffer.take();
     }
 
     fn upload_pixels(
@@ -261,19 +338,32 @@ impl App {
     }
 
     fn render_panel(&mut self, ime: &ImeState, qh: &QueueHandle<Self>) {
+        self.last_panel_state = ime.clone();
         let has_content = !ime.preedit.is_empty() || !ime.candidates.is_empty();
         let show_mode_hint = self
             .mode_hint_until
             .map_or(false, |t| std::time::Instant::now() < t);
 
+        diag_log(&format!(
+            "render_panel has_content={} show_mode_hint={} preedit={:?} candidates={} popup_surface={}",
+            has_content,
+            show_mode_hint,
+            ime.preedit,
+            ime.candidates.len(),
+            self.popup_surface.is_some()
+        ));
+
+        if (has_content || show_mode_hint) && self.popup_surface.is_none() {
+            self.create_popup(qh);
+        }
+
         let Some(surface) = &self.popup_surface else {
+            diag_log("render_panel skipped: no popup_surface");
             return;
         };
 
         if !has_content && !show_mode_hint {
-            surface.attach(None, 0, 0);
-            surface.commit();
-            self.popup_buffer.take();
+            self.hide_popup();
             return;
         }
 
@@ -376,6 +466,10 @@ impl App {
         let panel_h = ((if has_preedit { PREEDIT_H } else { 0.0 })
             + (if n > 0 { CELL_H } else { 0.0 }))
         .ceil() as i32;
+        diag_log(&format!(
+            "render_panel size={}x{} selected={} preedit_row={}",
+            panel_w, panel_h, ime.highlighted_candidate_index, has_preedit
+        ));
 
         let mut pixmap = match Pixmap::new(panel_w as u32, panel_h as u32) {
             Some(p) => p,
@@ -540,6 +634,8 @@ impl App {
             }
         }
 
+        dump_panel_pixmap(&pixmap);
+
         commit_pixmap(
             pixmap,
             self.popup_surface.as_ref().unwrap(),
@@ -553,6 +649,7 @@ impl App {
 
     fn handle_key_press(&mut self, evdev_key: u32, time: u32, qh: &QueueHandle<Self>) {
         if !self.active {
+            diag_log(&format!("inactive key press evdev_key={evdev_key}"));
             self.forward_raw_key(evdev_key, time);
             return;
         }
@@ -564,8 +661,13 @@ impl App {
             .map(|s| s.key_get_one_sym(xkb::Keycode::from(keycode)))
             .unwrap_or(xkb::Keysym::from(xkb::keysyms::KEY_NoSymbol));
         let sym_raw: u32 = keysym.into();
+        diag_log(&format!(
+            "key press evdev_key={evdev_key} keysym={sym_raw:#x} mods={:#x}",
+            self.mods
+        ));
 
         if sym_raw == xkb::keysyms::KEY_NoSymbol {
+            diag_log("keysym NoSymbol");
             return;
         }
 
@@ -584,13 +686,20 @@ impl App {
             _ => self.mods,
         };
 
-        let ime_state = self.engine.process_key(sym_raw, effective_mods);
+        let result = self.engine.process_key_result(sym_raw, effective_mods);
+        let ime_state = result.state;
         let Some(im) = &self.input_method else { return };
 
-        let consumed = ime_state.committed.is_some()
-            || !ime_state.preedit.is_empty()
-            || !ime_state.candidates.is_empty();
+        let consumed = result.accepted;
         let forward_consumed = should_forward_consumed_shortcut(sym_raw, effective_mods);
+        diag_log(&format!(
+            "ime state consumed={} ascii_mode={} commit={:?} preedit={:?} candidates={}",
+            consumed,
+            ime_state.ascii_mode,
+            ime_state.committed,
+            ime_state.preedit,
+            ime_state.candidates.len()
+        ));
 
         if consumed {
             // Update tray schema name when IME state changes.
@@ -731,6 +840,7 @@ fn commit_pixmap(
         bgra[b + 2] = px.red();
         bgra[b + 3] = px.alpha();
     }
+    dump_shm_bgra_buffer(&bgra, w, h);
     if tmp.write_all(&bgra).is_err() {
         return;
     }
@@ -930,20 +1040,35 @@ impl Dispatch<ZwpInputMethodV2, ()> for App {
     ) {
         match event {
             zwp_input_method_v2::Event::Activate => {
-                state.active = true;
-                state.keyboard_grab = Some(proxy.grab_keyboard(qh, ()));
-                state.create_popup(qh);
-                tracing::debug!("IME activated");
+                state.pending_active = Some(true);
+                if state.keyboard_grab.is_none() {
+                    state.keyboard_grab = Some(proxy.grab_keyboard(qh, ()));
+                }
+                tracing::debug!("IME activate pending until done");
+                diag_log("activate pending");
             }
             zwp_input_method_v2::Event::Deactivate => {
-                state.active = false;
-                state.keyboard_grab.take();
-                state.engine.reset();
-                state.destroy_popup();
-                tracing::debug!("IME deactivated");
+                state.pending_active = Some(false);
+                tracing::debug!("IME deactivate pending until done");
+                diag_log("deactivate pending");
             }
             zwp_input_method_v2::Event::Done => {
                 state.serial = state.serial.wrapping_add(1);
+                if let Some(next_active) = state.pending_active.take() {
+                    if next_active {
+                        state.deactivate_deadline = None;
+                        state.active = true;
+                        tracing::debug!("IME activated");
+                        diag_log("done -> active");
+                    } else {
+                        state.deactivate_deadline = Some(
+                            std::time::Instant::now()
+                                + std::time::Duration::from_millis(DEACTIVATE_DEBOUNCE_MS),
+                        );
+                        tracing::debug!("IME deactivation deferred for debounce");
+                        diag_log("done -> inactive debounce");
+                    }
+                }
             }
             zwp_input_method_v2::Event::Unavailable => {
                 tracing::error!("input method unavailable — another IME may be running");
@@ -964,6 +1089,7 @@ impl Dispatch<ZwpInputMethodKeyboardGrabV2, ()> for App {
     ) {
         match event {
             zwp_input_method_keyboard_grab_v2::Event::Keymap { format, fd, size } => {
+                diag_log(&format!("keymap format={format:?} size={size}"));
                 if format != WEnum::Value(wl_keyboard::KeymapFormat::XkbV1) {
                     return;
                 }
@@ -1044,13 +1170,35 @@ impl Dispatch<ZwpInputMethodKeyboardGrabV2, ()> for App {
 
 impl Dispatch<ZwpInputPopupSurfaceV2, ()> for App {
     fn event(
-        _s: &mut Self,
+        state: &mut Self,
         _p: &ZwpInputPopupSurfaceV2,
-        _e: zwp_input_popup_surface_v2::Event,
+        e: zwp_input_popup_surface_v2::Event,
         _: &(),
         _c: &Connection,
-        _q: &QueueHandle<Self>,
+        qh: &QueueHandle<Self>,
     ) {
+        if let zwp_input_popup_surface_v2::Event::TextInputRectangle {
+            x,
+            y,
+            width,
+            height,
+        } = e
+        {
+            diag_log(&format!(
+                "text_input_rectangle x={} y={} w={} h={}",
+                x, y, width, height
+            ));
+            let has_content = !state.last_panel_state.preedit.is_empty()
+                || !state.last_panel_state.candidates.is_empty();
+            let show_mode_hint = state
+                .mode_hint_until
+                .map_or(false, |t| std::time::Instant::now() < t);
+            if state.popup_surface.is_some() && (has_content || show_mode_hint) {
+                let panel = state.last_panel_state.clone();
+                diag_log("rerender_panel_after_rectangle");
+                state.render_panel(&panel, qh);
+            }
+        }
     }
 }
 

@@ -187,6 +187,14 @@ impl App {
     }
 
     fn handle_key_press(&mut self, keycode: u32, qh: &QueueHandle<Self>) {
+        tracing::info!(
+            "key press: keycode={keycode} xkb_state={}",
+            if self.xkb_state.is_some() {
+                "ok"
+            } else {
+                "NONE"
+            }
+        );
         let keysym = self
             .xkb_state
             .as_ref()
@@ -194,12 +202,14 @@ impl App {
             .unwrap_or(xkb::Keysym::from(xkb::keysyms::KEY_NoSymbol));
 
         let sym_raw: u32 = keysym.into();
+        tracing::info!("key sym: {sym_raw:#x}");
         if sym_raw == xkb::keysyms::KEY_NoSymbol {
+            tracing::warn!("key dropped: NoSymbol (xkb_state likely None)");
             return;
         }
 
-        let ime_state = match self.engine.process_key(sym_raw, self.mods) {
-            Some(s) => s,
+        let result = match self.engine.process_key_result(sym_raw, self.mods) {
+            Some(r) => r,
             None => {
                 // librime says it cannot process this key at all.
                 // Forward functional keys to the app as text or via protocol.
@@ -208,9 +218,18 @@ impl App {
             }
         };
 
-        let consumed = ime_state.committed.is_some()
-            || !ime_state.preedit.is_empty()
-            || !ime_state.candidates.is_empty();
+        let ime_state = result.state;
+
+        let consumed = result.accepted;
+
+        tracing::info!(
+            "ime state: consumed={} ascii_mode={} commit={:?} preedit={:?} candidates={}",
+            consumed,
+            ime_state.ascii_mode,
+            ime_state.committed,
+            ime_state.preedit,
+            ime_state.candidates.len(),
+        );
 
         if let Some(im) = &self.input_method {
             if consumed {
@@ -284,7 +303,12 @@ impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for App {
         _conn: &Connection,
         qh: &QueueHandle<Self>,
     ) {
-        if let wl_registry::Event::Global { name, interface, version } = event {
+        if let wl_registry::Event::Global {
+            name,
+            interface,
+            version,
+        } = event
+        {
             match interface.as_str() {
                 "wl_compositor" => {
                     state.compositor = Some(registry.bind(name, version.min(4), qh, ()));
@@ -316,16 +340,18 @@ impl Dispatch<ZwpInputMethodV2, ()> for App {
         match event {
             zwp_input_method_v2::Event::Activate => {
                 state.active = true;
+                // Always replace any existing grab so we don't accumulate stale proxies.
+                state.keyboard_grab = None;
                 let grab = proxy.grab_keyboard(qh, ());
+                tracing::info!("IME activated — keyboard grab requested");
                 state.keyboard_grab = Some(grab);
-                tracing::debug!("IME activated");
             }
             zwp_input_method_v2::Event::Deactivate => {
                 state.active = false;
-                state.keyboard_grab.take();
+                let had_grab = state.keyboard_grab.take().is_some();
                 state.engine.reset();
                 state.destroy_panel_popup();
-                tracing::debug!("IME deactivated");
+                tracing::info!("IME deactivated (had_grab={had_grab})");
             }
             zwp_input_method_v2::Event::Done => {
                 state.serial = state.serial.wrapping_add(1);
@@ -353,7 +379,9 @@ impl Dispatch<ZwpInputMethodKeyboardGrabV2, ()> for App {
     ) {
         match event {
             zwp_input_method_keyboard_grab_v2::Event::Keymap { format, fd, size } => {
+                tracing::info!("keyboard grab: Keymap received format={format:?} size={size}");
                 if format != WEnum::Value(wl_keyboard::KeymapFormat::XkbV1) {
+                    tracing::warn!("keyboard grab: unexpected keymap format {format:?}, skipping");
                     return;
                 }
                 let mmap = unsafe {
@@ -363,8 +391,7 @@ impl Dispatch<ZwpInputMethodKeyboardGrabV2, ()> for App {
                 };
                 if let Ok(mmap) = mmap {
                     let s = unsafe {
-                        let bytes =
-                            std::slice::from_raw_parts(mmap.as_ptr(), size as usize - 1);
+                        let bytes = std::slice::from_raw_parts(mmap.as_ptr(), size as usize - 1);
                         std::str::from_utf8_unchecked(bytes).to_string()
                     };
                     if let Some(km) = xkb::Keymap::new_from_string(
@@ -391,31 +418,16 @@ impl Dispatch<ZwpInputMethodKeyboardGrabV2, ()> for App {
                 ..
             } => {
                 if let Some(xkb_state) = &mut state.xkb_state {
-                    xkb_state.update_mask(
-                        mods_depressed,
-                        mods_latched,
-                        mods_locked,
-                        0,
-                        0,
-                        group,
-                    );
+                    xkb_state.update_mask(mods_depressed, mods_latched, mods_locked, 0, 0, group);
                     let mut m = 0u32;
-                    if xkb_state.mod_name_is_active(
-                        xkb::MOD_NAME_SHIFT,
-                        xkb::STATE_MODS_EFFECTIVE,
-                    ) {
+                    if xkb_state.mod_name_is_active(xkb::MOD_NAME_SHIFT, xkb::STATE_MODS_EFFECTIVE)
+                    {
                         m |= MOD_SHIFT;
                     }
-                    if xkb_state.mod_name_is_active(
-                        xkb::MOD_NAME_CTRL,
-                        xkb::STATE_MODS_EFFECTIVE,
-                    ) {
+                    if xkb_state.mod_name_is_active(xkb::MOD_NAME_CTRL, xkb::STATE_MODS_EFFECTIVE) {
                         m |= MOD_CONTROL;
                     }
-                    if xkb_state.mod_name_is_active(
-                        xkb::MOD_NAME_ALT,
-                        xkb::STATE_MODS_EFFECTIVE,
-                    ) {
+                    if xkb_state.mod_name_is_active(xkb::MOD_NAME_ALT, xkb::STATE_MODS_EFFECTIVE) {
                         m |= MOD_MOD1;
                     }
                     state.mods = m;
@@ -435,8 +447,12 @@ impl Dispatch<ZwpInputPopupSurfaceV2, ()> for App {
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
     ) {
-        if let zwp_input_popup_surface_v2::Event::TextInputRectangle { x, y, width, height } =
-            event
+        if let zwp_input_popup_surface_v2::Event::TextInputRectangle {
+            x,
+            y,
+            width,
+            height,
+        } = event
         {
             tracing::trace!("cursor hint: {x},{y} {width}x{height}");
         }
@@ -466,14 +482,13 @@ pub fn run(engine: CoreEngine) {
     let seat: WlSeat = globals
         .bind(&qh, 1..=7, ())
         .expect("wl_seat not advertised");
-    let ime_manager: ZwpInputMethodManagerV2 =
-        globals.bind(&qh, 1..=1, ()).unwrap_or_else(|_| {
-            tracing::error!(
-                "compositor does not advertise zwp_input_method_manager_v2; \
+    let ime_manager: ZwpInputMethodManagerV2 = globals.bind(&qh, 1..=1, ()).unwrap_or_else(|_| {
+        tracing::error!(
+            "compositor does not advertise zwp_input_method_manager_v2; \
                  try a wlroots compositor (sway, niri, river, etc.)"
-            );
-            std::process::exit(1);
-        });
+        );
+        std::process::exit(1);
+    });
 
     let mut app = App::new(engine);
     app.compositor = Some(compositor);

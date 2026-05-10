@@ -37,7 +37,6 @@ result-*
 # Rust / Cargo build outputs
 target/
 **/*.rs.bk
-Cargo.lock
 
 # Tauri build artefacts
 src-tauri/target/

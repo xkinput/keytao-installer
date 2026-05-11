@@ -55,7 +55,7 @@
 
           src = pkgs.fetchurl {
             url = "https://github.com/xkinput/keytao-installer/releases/download/v${version}/keytao-installer-${version}-linux-x86_64.tar.gz";
-            hash = "sha256-w/yUwsfAxUfT6N4SisuVVx2lN1ykSxZa2uX/w8ADEw8=";
+            hash = "sha256-UZZSgy6paNMLx5R/nkSHviSnVHLA3Ne1fy8DVaiFEhA=";
           };
 
           dontUnpack = true;

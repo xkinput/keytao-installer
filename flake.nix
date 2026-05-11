@@ -47,7 +47,7 @@
         androidSdk = androidComposition.androidsdk;
       in
       let
-        version = "0.0.10-alpha";
+        version = "0.0.11-alpha";
       in
       let
         keytaoLinuxIme = pkgs.rustPlatform.buildRustPackage {

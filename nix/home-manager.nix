@@ -34,6 +34,12 @@ in
       description = "Export toolkit environment variables for keytao-ime compatibility.";
     };
 
+    forceXimToolkitEnvironment = lib.mkOption {
+      type = lib.types.bool;
+      default = false;
+      description = "Force GTK_IM_MODULE and QT_IM_MODULE to xim for legacy X11 applications.";
+    };
+
     autostart = lib.mkOption {
       type = lib.types.bool;
       default = pkgs.stdenv.isLinux;
@@ -50,12 +56,16 @@ in
       (lib.mkIf cfg.setInputMethodEnvironment {
         home.sessionVariables = {
           XMODIFIERS = "@im=keytao";
+        }
+        // lib.optionalAttrs cfg.forceXimToolkitEnvironment {
           GTK_IM_MODULE = lib.mkDefault "xim";
           QT_IM_MODULE = lib.mkDefault "xim";
         };
 
         systemd.user.sessionVariables = {
           XMODIFIERS = "@im=keytao";
+        }
+        // lib.optionalAttrs cfg.forceXimToolkitEnvironment {
           GTK_IM_MODULE = lib.mkDefault "xim";
           QT_IM_MODULE = lib.mkDefault "xim";
         };
@@ -75,6 +85,8 @@ in
       (lib.mkIf (cfg.setInputMethodEnvironment && hasNiri) {
         programs.niri.settings.environment = {
           "XMODIFIERS" = "@im=keytao";
+        }
+        // lib.optionalAttrs cfg.forceXimToolkitEnvironment {
           "GTK_IM_MODULE" = lib.mkDefault "xim";
           "QT_IM_MODULE" = lib.mkDefault "xim";
         };

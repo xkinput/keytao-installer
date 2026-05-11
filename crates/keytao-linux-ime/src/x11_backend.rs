@@ -44,6 +44,7 @@ struct KeyTaoHandler {
     renderer: Option<PanelRenderer>,
     conn: Arc<XCBConnection>,
     panel_win: Window,
+    panel_depth: u8,
     gc: Gcontext,
     panel_visible: bool,
     // Keycode → keysym table fetched from the X11 server at init time.
@@ -122,6 +123,7 @@ impl KeyTaoHandler {
             renderer,
             conn,
             panel_win,
+            panel_depth: depth,
             gc,
             panel_visible: false,
             keycode_map,
@@ -166,7 +168,7 @@ impl KeyTaoHandler {
                 0,
                 0,
                 0,
-                32,
+                self.panel_depth,
                 &pixels,
             )
             .ok();

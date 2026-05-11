@@ -3,6 +3,9 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tauri::{AppHandle, Emitter, Listener, Manager};
 
+#[cfg(target_os = "linux")]
+use std::sync::Mutex;
+
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 use keytao_core;
 
@@ -71,6 +74,27 @@ pub struct InstallResult {
 }
 
 const API_BASE: &str = "https://keytao.rea.ink";
+
+#[cfg(target_os = "linux")]
+#[derive(Default)]
+struct ManagedImeHelper(Mutex<Option<std::process::Child>>);
+
+#[cfg(target_os = "linux")]
+fn stop_managed_ime_helper(app: &tauri::AppHandle) {
+    let state = app.state::<ManagedImeHelper>();
+    let Ok(mut child_slot) = state.0.lock() else {
+        tracing::warn!("failed to lock managed IME helper state during shutdown");
+        return;
+    };
+    if let Some(mut child) = child_slot.take() {
+        let pid = child.id();
+        if let Err(e) = child.kill() {
+            tracing::warn!("failed to kill managed keytao-ime pid={pid}: {e}");
+        }
+        let _ = child.wait();
+        tracing::info!("managed keytao-ime pid={pid} stopped");
+    }
+}
 
 #[cfg(target_os = "linux")]
 fn resolve_keytao_ime_command() -> (std::process::Command, String) {
@@ -1395,8 +1419,16 @@ pub fn run() {
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     let builder = builder
         .plugin(tauri_plugin_global_shortcut::Builder::default().build())
-        .manage(rime::RimeEngine::default())
-        .on_window_event(|window, event| {
+        .manage(rime::RimeEngine::default());
+
+    #[cfg(all(
+        not(any(target_os = "android", target_os = "ios")),
+        target_os = "linux"
+    ))]
+    let builder = builder.manage(ManagedImeHelper::default());
+
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    let builder = builder.on_window_event(|window, event| {
             #[cfg(target_os = "linux")]
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 let _ = window.hide();
@@ -1529,13 +1561,20 @@ pub fn run() {
                 // Ensure keytao-ime is running for X11/XIM and IBus (WeChat etc.).
                 // Always remove WAYLAND_DISPLAY here so the standalone process does
                 // not register another zwp_input_method_v2 client and break global
-                // key handling. The Tauri app's embedded IME owns the Wayland path.
+                // key handling. The Tauri app's embedded IME owns the Wayland path,
+                // so the helper auto-selects XIM + IBus without extra flags.
                 let (mut ime_cmd, ime_display) = resolve_keytao_ime_command();
                 let same_binary_running = is_same_keytao_ime_running(&ime_display);
                 let any_ime_running = is_any_keytao_ime_running();
                 if !any_ime_running {
                     match ime_cmd.env_remove("WAYLAND_DISPLAY").spawn() {
-                        Ok(_) => tracing::info!("keytao-ime spawned from {ime_display}"),
+                        Ok(child) => {
+                            let pid = child.id();
+                            if let Ok(mut slot) = app.state::<ManagedImeHelper>().0.lock() {
+                                *slot = Some(child);
+                            }
+                            tracing::info!("keytao-ime spawned from {ime_display} pid={pid}");
+                        }
                         Err(e) => tracing::warn!(
                             "keytao-ime failed to spawn from {ime_display}: {e}"
                         ),
@@ -1596,8 +1635,14 @@ pub fn run() {
             #[cfg(not(any(target_os = "android", target_os = "ios")))]
             rime::rime_has_schemas,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            #[cfg(target_os = "linux")]
+            if matches!(event, tauri::RunEvent::Exit) {
+                stop_managed_ime_helper(app);
+            }
+        });
 }
 
 #[cfg(test)]

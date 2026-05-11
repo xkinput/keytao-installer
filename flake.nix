@@ -47,7 +47,7 @@
         androidSdk = androidComposition.androidsdk;
       in
       let
-        version = "0.0.6-alpha";
+        version = "0.0.7-alpha";
 
         binaryPkg = pkgs.stdenv.mkDerivation {
           pname = "keytao-installer-bin";
@@ -55,7 +55,7 @@
 
           src = pkgs.fetchurl {
             url = "https://github.com/xkinput/keytao-installer/releases/download/v${version}/keytao-installer-${version}-linux-x86_64.tar.gz";
-            hash = "sha256-okYpjH8vkhucD9iLyOMFrO5fUg/K+zjFNA+jDowcFEI=";
+            hash = "sha256-w/yUwsfAxUfT6N4SisuVVx2lN1ykSxZa2uX/w8ADEw8=";
           };
 
           dontUnpack = true;

@@ -850,9 +850,6 @@ export default function App() {
                   </div>
                 ))}
               </div>
-              <p className="text-xs text-muted-foreground">
-                用户目录只应保留 `default.custom.yaml` 这类补丁文件。如果后续仍有 deploy 相关报错，应该检查共享数据是否缺少基础 preset，而不是再往用户目录补 `default.yaml`。
-              </p>
             </CardContent>
           </Card>
         )}

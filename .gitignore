@@ -47,8 +47,6 @@ src-tauri/gen/apple/
 # Frontend build output
 dist/
 dist-ssr/
-!dist/
-!dist/**
 
 # Linux build output
 *.AppImage

@@ -47,7 +47,7 @@
         androidSdk = androidComposition.androidsdk;
       in
       let
-        version = "0.0.9-alpha";
+        version = "0.0.10-alpha";
       in
       let
         keytaoLinuxIme = pkgs.rustPlatform.buildRustPackage {
@@ -82,7 +82,7 @@
           LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
         };
 
-        keytaoInstallerBin = pkgs.rustPlatform.buildRustPackage {
+        keytaoInstallerBin = pkgs.rustPlatform.buildRustPackage (finalAttrs: {
           pname = "keytao-installer";
           inherit version;
           src = pkgs.lib.cleanSource ./.;
@@ -90,11 +90,22 @@
           cargoBuildFlags = [
             "--package"
             "keytao-installer"
+            "--features"
+            "custom-protocol"
           ];
           nativeBuildInputs = with pkgs; [
+            nodejs_22
+            pnpm_10
+            pnpmConfigHook
             pkg-config
             llvmPackages.libclang
           ];
+          pnpmDeps = pkgs.fetchPnpmDeps {
+            inherit (finalAttrs) pname version src;
+            pnpm = pkgs.pnpm_10;
+            fetcherVersion = 3;
+            hash = "sha256-DBZKGbeBJUtK/zEM39w9NW0hofnlERGJrMcTnqZ+pxg=";
+          };
           buildInputs = with pkgs; [
             librime
             libxkbcommon
@@ -117,16 +128,13 @@
             xz
           ];
           preBuild = ''
-            test -f dist/index.html || {
-              echo "dist/index.html is missing; run pnpm build before updating the flake source" >&2
-              exit 1
-            }
+            pnpm build
           '';
           doCheck = false;
           RIME_INCLUDE_DIR = "${pkgs.librime}/include";
           RIME_LIB_DIR = "${pkgs.librime}/lib";
           LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
-        };
+        });
 
         fhsEnv = pkgs.buildFHSEnv {
           name = "keytao-installer";

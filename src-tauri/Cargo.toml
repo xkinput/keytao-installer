@@ -1,6 +1,6 @@
 [package]
 name = "keytao-installer"
-version = "0.0.9-alpha"
+version = "0.0.10-alpha"
 description = "KeyTao input method installer"
 authors = ["Rea <hi@rea.ink>"]
 edition = "2021"
@@ -13,6 +13,9 @@ edition = "2021"
 # This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
 name = "keytao_installer_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
+
+[features]
+custom-protocol = ["tauri/custom-protocol"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

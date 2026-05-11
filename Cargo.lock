@@ -2549,7 +2549,7 @@ dependencies = [
 
 [[package]]
 name = "keytao-installer"
-version = "0.0.11-alpha"
+version = "0.0.12-alpha"
 dependencies = [
  "cosmic-text",
  "dirs 5.0.1",

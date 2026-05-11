@@ -47,7 +47,7 @@
         androidSdk = androidComposition.androidsdk;
       in
       let
-        version = "0.0.11-alpha";
+        version = "0.0.12-alpha";
       in
       let
         keytaoLinuxIme = pkgs.rustPlatform.buildRustPackage {
@@ -137,7 +137,7 @@
         });
 
         fhsEnv = pkgs.buildFHSEnv {
-          name = "keytao-installer";
+          name = "keytao-installer-unwrapped";
           targetPkgs =
             p: with p; [
               webkitgtk_4_1
@@ -164,9 +164,20 @@
           runScript = "${keytaoInstallerBin}/bin/keytao-installer";
         };
 
+        keytaoInstallerLauncher = pkgs.writeShellScriptBin "keytao-installer" ''
+          export DISPLAY="''${DISPLAY:-:0}"
+          export XMODIFIERS="''${XMODIFIERS:-@im=keytao}"
+          export GTK_IM_MODULE="''${GTK_IM_MODULE:-wayland}"
+          export QT_IM_MODULE="''${QT_IM_MODULE:-wayland}"
+          export GDK_BACKEND="''${GDK_BACKEND:-wayland}"
+          export WEBKIT_DISABLE_DMABUF_RENDERER="''${WEBKIT_DISABLE_DMABUF_RENDERER:-1}"
+
+          exec ${fhsEnv}/bin/keytao-installer-unwrapped "$@"
+        '';
+
         desktopItem = pkgs.makeDesktopItem {
           name = "keytao-installer";
-          exec = "keytao-installer %U";
+          exec = "${keytaoInstallerLauncher}/bin/keytao-installer %U";
           icon = "keytao-installer";
           desktopName = "键道安装器";
           comment = "Keytao IME installer";
@@ -181,7 +192,7 @@
         keytaoInstallerPkg = pkgs.symlinkJoin {
           name = "keytao-installer";
           paths = [
-            fhsEnv
+            keytaoInstallerLauncher
             desktopItem
             iconPkg
           ];

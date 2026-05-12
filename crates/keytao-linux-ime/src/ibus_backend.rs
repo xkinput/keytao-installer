@@ -47,6 +47,18 @@ fn should_bypass_empty_composition(sym: u32, mods: u32, state: &ImeState) -> boo
     )
 }
 
+/// Map a keyval to a candidate index based on the engine's select_keys config.
+/// Returns None if the key is not a candidate selection key for the current state.
+fn candidate_index_for_select_key(sym: u32, state: &ImeState) -> Option<usize> {
+    if state.candidates.is_empty() {
+        return None;
+    }
+    let keys = state.select_keys.as_deref().unwrap_or("1234567890");
+    // Convert keysym to the char it represents (basic ASCII range only).
+    let ch = char::from_u32(sym)?;
+    keys.chars().position(|k| k == ch)
+}
+
 /// Build an IBusText structure as a variant.
 /// IBus D-Bus type: v containing (sa{sv}sv)
 ///   ("IBusText", {}, text_string, v:("IBusAttrList",{},[]))
@@ -76,8 +88,15 @@ fn ibus_text_variant(text: &str) -> zvariant::Value<'static> {
         .append_field(attr_list_variant)
         .build();
 
-    // Wrap as variant (signals take `v`)
-    Value::Value(Box::new(Value::Structure(ibus_text_struct)))
+    // Return the structure directly so callers used as `v` signal parameters get
+    // single-wrapped (v(sa{sv}sv)).  For av array elements callers must wrap
+    // explicitly with Value::Value(Box::new(ibus_text_variant(…))).
+    Value::Structure(ibus_text_struct)
+}
+
+/// Wrap an IBusText structure inside a variant for use in `av` arrays.
+fn ibus_text_as_variant(text: &str) -> zvariant::Value<'static> {
+    zvariant::Value::Value(Box::new(ibus_text_variant(text)))
 }
 
 fn ibus_text_value(text: &str) -> zvariant::OwnedValue {
@@ -114,8 +133,7 @@ fn ibus_engine_desc_value() -> zvariant::OwnedValue {
         .add_field("".to_owned()) // textdomain
         .build();
 
-    zvariant::OwnedValue::try_from(Value::Value(Box::new(Value::Structure(engine))))
-        .expect("ibus_engine_desc_value")
+    zvariant::OwnedValue::try_from(Value::Structure(engine)).expect("ibus_engine_desc_value")
 }
 
 fn candidate_display_text(candidate: &Candidate) -> String {
@@ -149,7 +167,7 @@ fn ibus_lookup_table_value(state: &ImeState) -> zvariant::OwnedValue {
     let mut candidates = Array::new(sig_v.clone());
     for candidate in &state.candidates {
         candidates
-            .append(ibus_text_variant(&candidate_display_text(candidate)))
+            .append(ibus_text_as_variant(&candidate_display_text(candidate)))
             .expect("append IBus lookup candidate");
     }
 
@@ -157,7 +175,7 @@ fn ibus_lookup_table_value(state: &ImeState) -> zvariant::OwnedValue {
     let select_keys = state.select_keys.as_deref();
     for index in 0..state.candidates.len() {
         labels
-            .append(ibus_text_variant(&candidate_label(index, select_keys)))
+            .append(ibus_text_as_variant(&candidate_label(index, select_keys)))
             .expect("append IBus lookup label");
     }
 
@@ -178,8 +196,7 @@ fn ibus_lookup_table_value(state: &ImeState) -> zvariant::OwnedValue {
         .append_field(Value::Array(labels))
         .build();
 
-    zvariant::OwnedValue::try_from(Value::Value(Box::new(Value::Structure(table))))
-        .expect("ibus_lookup_table_value")
+    zvariant::OwnedValue::try_from(Value::Structure(table)).expect("ibus_lookup_table_value")
 }
 
 // ── InputContext D-Bus object ─────────────────────────────────────────────────
@@ -254,29 +271,39 @@ impl InputContext {
             return false;
         }
         if is_enter_key(keyval) && !before_state.preedit.is_empty() {
+            clear_preedit(&ctxt).await;
             let ov = ibus_text_value(&before_state.preedit);
             if let Ok(v) = zvariant::Value::try_from(&ov) {
                 let _ = Self::commit_text(&ctxt, v).await;
             }
             self.session.reset();
-            clear_input_context_ui(&ctxt).await;
+            let _ = Self::hide_lookup_table(&ctxt).await;
             return true;
         }
-        if is_candidate_select_key(keyval) && !before_state.candidates.is_empty() {
-            let index = before_state
-                .highlighted_candidate_index
-                .min(before_state.candidates.len().saturating_sub(1));
-            if let Some(ime_state) = self.session.select_candidate(index) {
-                if let Some(ref text) = ime_state.committed {
-                    if !text.is_empty() {
-                        let ov = ibus_text_value(text);
-                        if let Ok(v) = zvariant::Value::try_from(&ov) {
-                            let _ = Self::commit_text(&ctxt, v).await;
+        let candidate_select_index = if is_candidate_select_key(keyval) {
+            Some(
+                before_state
+                    .highlighted_candidate_index
+                    .min(before_state.candidates.len().saturating_sub(1)),
+            )
+        } else {
+            candidate_index_for_select_key(keyval, &before_state)
+        };
+        if let Some(index) = candidate_select_index {
+            if !before_state.candidates.is_empty() {
+                if let Some(ime_state) = self.session.select_candidate(index) {
+                    if let Some(ref text) = ime_state.committed {
+                        if !text.is_empty() {
+                            clear_preedit(&ctxt).await;
+                            let ov = ibus_text_value(text);
+                            if let Ok(v) = zvariant::Value::try_from(&ov) {
+                                let _ = Self::commit_text(&ctxt, v).await;
+                            }
                         }
                     }
+                    clear_input_context_ui(&ctxt).await;
+                    return true;
                 }
-                clear_input_context_ui(&ctxt).await;
-                return true;
             }
         }
 
@@ -292,6 +319,7 @@ impl InputContext {
         if let Some(ref text) = ime_state.committed {
             if !text.is_empty() {
                 tracing::debug!("IBus CommitText: {text:?}");
+                clear_preedit(&ctxt).await;
                 let ov = ibus_text_value(text);
                 if let Ok(v) = zvariant::Value::try_from(&ov) {
                     let _ = Self::commit_text(&ctxt, v).await;
@@ -354,6 +382,17 @@ impl InputContext {
 async fn clear_input_context_ui(ctxt: &SignalContext<'_>) {
     let _ = InputContext::hide_preedit_text(ctxt).await;
     let _ = InputContext::hide_lookup_table(ctxt).await;
+}
+
+/// Send an empty UpdatePreeditText to tell the client the composition ended
+/// before committing. This is the sequence Chromium/CEF requires so that it
+/// can correctly place the committed text without conflating it with the
+/// still-active preedit region.
+async fn clear_preedit(ctxt: &SignalContext<'_>) {
+    let ov = ibus_text_value("");
+    if let Ok(v) = zvariant::Value::try_from(&ov) {
+        let _ = InputContext::update_preedit_text(ctxt, v, 0, false).await;
+    }
 }
 
 // ── IBusBus D-Bus object ──────────────────────────────────────────────────────

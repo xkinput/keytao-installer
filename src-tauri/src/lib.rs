@@ -124,7 +124,9 @@ fn write_kde_autostart(app: &tauri::AppHandle) {
     let Some(home) = std::env::var_os("HOME") else {
         return;
     };
-    let autostart_dir = std::path::Path::new(&home).join(".config").join("autostart");
+    let autostart_dir = std::path::Path::new(&home)
+        .join(".config")
+        .join("autostart");
     if let Err(e) = std::fs::create_dir_all(&autostart_dir) {
         tracing::warn!("Cannot create autostart dir: {e}");
         return;

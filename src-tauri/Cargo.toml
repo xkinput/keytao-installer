@@ -1,6 +1,6 @@
 [package]
 name = "keytao-installer"
-version = "0.0.12-alpha"
+version = "0.0.16-alpha"
 description = "KeyTao input method installer"
 authors = ["Rea <hi@rea.ink>"]
 edition = "2021"

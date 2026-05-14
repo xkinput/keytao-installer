@@ -84,13 +84,23 @@ impl BackendSelection {
         Ok(selection)
     }
 
-    fn for_session(has_wayland: bool, has_x11: bool, is_gnome: bool) -> Self {
+    fn for_session(has_wayland: bool, has_x11: bool, is_gnome: bool, is_kde: bool) -> Self {
         if is_gnome {
             // GNOME does not support zwp_input_method_manager_v2.
             // Use the IBus engine backend which connects to GNOME's ibus-daemon,
             // plus XIM for any XWayland apps.
             return Self {
                 ibus_engine: true,
+                xim: has_x11,
+                ..Default::default()
+            };
+        }
+        if is_kde {
+            // KDE/KWin only grants zwp_input_method_v2 to its registered virtual-keyboard
+            // plugin (a compiled .so); arbitrary processes always get Unavailable.
+            // Fall back to IBus server + XIM instead.
+            return Self {
+                ibus: has_wayland || has_x11,
                 xim: has_x11,
                 ..Default::default()
             };
@@ -134,6 +144,36 @@ impl BackendSelection {
             parts.push("ibus");
         }
         parts.join(",")
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn write_kde_env_file() {
+    let Some(home) = std::env::var_os("HOME") else {
+        tracing::warn!("HOME not set; skipping KDE env file");
+        return;
+    };
+    let env_dir = std::path::Path::new(&home)
+        .join(".config")
+        .join("plasma-workspace")
+        .join("env");
+    if let Err(e) = std::fs::create_dir_all(&env_dir) {
+        tracing::warn!("Cannot create KDE env dir: {e}");
+        return;
+    }
+    let env_file = env_dir.join("keytao.sh");
+    let content = "# Written by keytao-ime — configures IBus as the input method for KDE Plasma.\n\
+                   # Do NOT edit; this file is managed automatically.\n\
+                   export QT_IM_MODULE=ibus\n\
+                   export GTK_IM_MODULE=ibus\n\
+                   export XMODIFIERS=@im=ibus\n";
+    match std::fs::write(&env_file, content) {
+        Ok(()) => tracing::info!(
+            "KDE IBus env written to {}. \
+             Log out and back in for Qt/GTK apps to use KeyTao.",
+            env_file.display()
+        ),
+        Err(e) => tracing::warn!("Cannot write KDE env file {}: {e}", env_file.display()),
     }
 }
 
@@ -190,12 +230,16 @@ fn main() {
 
         // --ibus-engine flag means we were launched by ibus-daemon itself — skip
         // auto-detection and run only as an IBus engine.
+        if is_kde && !requested_backends.any() {
+            write_kde_env_file();
+        }
+
         let selected = if requested_backends.ibus_engine {
             requested_backends
         } else if requested_backends.any() {
             requested_backends
         } else {
-            BackendSelection::for_session(has_wayland, has_x11, is_gnome)
+            BackendSelection::for_session(has_wayland, has_x11, is_gnome, is_kde)
         };
 
         if !selected.any() {
@@ -247,16 +291,7 @@ fn main() {
 
         if selected.wayland {
             match wayland_backend::run(engine) {
-                Ok(()) => {
-                    if is_kde {
-                        tracing::info!(
-                            "KDE detected: Wayland IME slot unavailable. \
-                             IBus/XIM backends are active. To use the Wayland backend \
-                             go to System Settings → Input Devices → Virtual Keyboard \
-                             and set it to None, then restart keytao-ime."
-                        );
-                    }
-                }
+                Ok(()) => {}
                 Err(e) => {
                     tracing::warn!("Wayland backend stopped: {e}");
                 }

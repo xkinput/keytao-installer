@@ -113,6 +113,44 @@ fn linux_target_triple() -> &'static str {
 }
 
 #[cfg(target_os = "linux")]
+fn write_kde_autostart(app: &tauri::AppHandle) {
+    let desktop = std::env::var("XDG_CURRENT_DESKTOP")
+        .unwrap_or_default()
+        .to_lowercase();
+    if !desktop.split(':').any(|s| s == "kde") {
+        return;
+    }
+
+    let Some(home) = std::env::var_os("HOME") else {
+        return;
+    };
+    let autostart_dir = std::path::Path::new(&home).join(".config").join("autostart");
+    if let Err(e) = std::fs::create_dir_all(&autostart_dir) {
+        tracing::warn!("Cannot create autostart dir: {e}");
+        return;
+    }
+
+    let (_, ime_path) = resolve_keytao_ime_command(app);
+    let content = format!(
+        "[Desktop Entry]\n\
+         Type=Application\n\
+         Name=KeyTao IME\n\
+         Comment=KeyTao Input Method Engine\n\
+         Exec={ime_path}\n\
+         Icon=ibus\n\
+         X-GNOME-Autostart-enabled=true\n\
+         X-KDE-autostart-phase=1\n\
+         X-KDE-autostart-after=panel\n"
+    );
+
+    let desktop_file = autostart_dir.join("keytao-ime.desktop");
+    match std::fs::write(&desktop_file, &content) {
+        Ok(()) => tracing::info!("KDE autostart written to {}", desktop_file.display()),
+        Err(e) => tracing::warn!("Cannot write KDE autostart: {e}"),
+    }
+}
+
+#[cfg(target_os = "linux")]
 fn resolve_keytao_ime_command(app: &tauri::AppHandle) -> (std::process::Command, String) {
     if let Ok(path) = std::env::var("KEYTAO_IME_BIN") {
         return (std::process::Command::new(&path), path);
@@ -1554,6 +1592,9 @@ pub fn run() {
                     })
                     .build(app)?;
                 drop(tray);
+
+                #[cfg(target_os = "linux")]
+                write_kde_autostart(app.handle());
 
                 // Ensure the single Linux IME daemon owns Wayland, XIM, and IBus frontends.
                 let (mut ime_cmd, ime_display) = resolve_keytao_ime_command(app.handle());

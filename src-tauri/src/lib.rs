@@ -113,42 +113,37 @@ fn linux_target_triple() -> &'static str {
 }
 
 #[cfg(target_os = "linux")]
-fn write_kde_autostart(app: &tauri::AppHandle) {
+fn is_kde_session() -> bool {
     let desktop = std::env::var("XDG_CURRENT_DESKTOP")
         .unwrap_or_default()
         .to_lowercase();
-    if !desktop.split(':').any(|s| s == "kde") {
+    desktop.split(':').any(|s| s == "kde")
+}
+
+#[cfg(target_os = "linux")]
+fn cleanup_kde_legacy_ime_files() {
+    if !is_kde_session() {
         return;
     }
 
     let Some(home) = std::env::var_os("HOME") else {
         return;
     };
-    let autostart_dir = std::path::Path::new(&home)
+    let desktop_file = std::path::Path::new(&home)
         .join(".config")
-        .join("autostart");
-    if let Err(e) = std::fs::create_dir_all(&autostart_dir) {
-        tracing::warn!("Cannot create autostart dir: {e}");
-        return;
-    }
-
-    let (_, ime_path) = resolve_keytao_ime_command(app);
-    let content = format!(
-        "[Desktop Entry]\n\
-         Type=Application\n\
-         Name=KeyTao IME\n\
-         Comment=KeyTao Input Method Engine\n\
-         Exec={ime_path}\n\
-         Icon=ibus\n\
-         X-GNOME-Autostart-enabled=true\n\
-         X-KDE-autostart-phase=1\n\
-         X-KDE-autostart-after=panel\n"
-    );
-
-    let desktop_file = autostart_dir.join("keytao-ime.desktop");
-    match std::fs::write(&desktop_file, &content) {
-        Ok(()) => tracing::info!("KDE autostart written to {}", desktop_file.display()),
-        Err(e) => tracing::warn!("Cannot write KDE autostart: {e}"),
+        .join("autostart")
+        .join("keytao-ime.desktop");
+    if desktop_file.exists() {
+        match std::fs::remove_file(&desktop_file) {
+            Ok(()) => tracing::info!(
+                "Removed legacy KDE autostart {} to avoid conflicting IME daemons",
+                desktop_file.display()
+            ),
+            Err(e) => tracing::warn!(
+                "Cannot remove legacy KDE autostart {}: {e}",
+                desktop_file.display()
+            ),
+        }
     }
 }
 
@@ -1596,32 +1591,39 @@ pub fn run() {
                 drop(tray);
 
                 #[cfg(target_os = "linux")]
-                write_kde_autostart(app.handle());
+                cleanup_kde_legacy_ime_files();
 
                 // Ensure the single Linux IME daemon owns Wayland, XIM, and IBus frontends.
-                let (mut ime_cmd, ime_display) = resolve_keytao_ime_command(app.handle());
-                let same_binary_running = is_same_keytao_ime_running(&ime_display);
-                let any_ime_running = is_any_keytao_ime_running();
-                if !any_ime_running {
-                    match ime_cmd.spawn() {
-                        Ok(child) => {
-                            let pid = child.id();
-                            if let Ok(mut slot) = app.state::<ManagedImeHelper>().0.lock() {
-                                *slot = Some(child);
-                            }
-                            tracing::info!("keytao-ime spawned from {ime_display} pid={pid}");
-                        }
-                        Err(e) => tracing::warn!(
-                            "keytao-ime failed to spawn from {ime_display}: {e}"
-                        ),
-                    }
-                } else if same_binary_running {
-                    tracing::info!("keytao-ime already running from {ime_display}");
-                } else {
-                    tracing::warn!(
-                        "a different keytao-ime is already running; expected {ime_display}. \
-                         Stop the existing IME if you want nr tauri dev to exercise the local binary."
+                if is_kde_session() {
+                    tracing::info!(
+                        "KDE session detected; not auto-starting a standalone keytao-ime daemon. \
+                         KWin Virtual Keyboard should own the Wayland IME process."
                     );
+                } else {
+                    let (mut ime_cmd, ime_display) = resolve_keytao_ime_command(app.handle());
+                    let same_binary_running = is_same_keytao_ime_running(&ime_display);
+                    let any_ime_running = is_any_keytao_ime_running();
+                    if !any_ime_running {
+                        match ime_cmd.spawn() {
+                            Ok(child) => {
+                                let pid = child.id();
+                                if let Ok(mut slot) = app.state::<ManagedImeHelper>().0.lock() {
+                                    *slot = Some(child);
+                                }
+                                tracing::info!("keytao-ime spawned from {ime_display} pid={pid}");
+                            }
+                            Err(e) => tracing::warn!(
+                                "keytao-ime failed to spawn from {ime_display}: {e}"
+                            ),
+                        }
+                    } else if same_binary_running {
+                        tracing::info!("keytao-ime already running from {ime_display}");
+                    } else {
+                        tracing::warn!(
+                            "a different keytao-ime is already running; expected {ime_display}. \
+                             Stop the existing IME if you want nr tauri dev to exercise the local binary."
+                        );
+                    }
                 }
             }
 

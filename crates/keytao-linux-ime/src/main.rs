@@ -148,32 +148,23 @@ impl BackendSelection {
 }
 
 #[cfg(target_os = "linux")]
-fn write_kde_env_file() {
+fn remove_legacy_kde_env_file() {
     let Some(home) = std::env::var_os("HOME") else {
-        tracing::warn!("HOME not set; skipping KDE env file");
         return;
     };
-    let env_dir = std::path::Path::new(&home)
+    let env_file = std::path::Path::new(&home)
         .join(".config")
         .join("plasma-workspace")
-        .join("env");
-    if let Err(e) = std::fs::create_dir_all(&env_dir) {
-        tracing::warn!("Cannot create KDE env dir: {e}");
-        return;
-    }
-    let env_file = env_dir.join("keytao.sh");
-    let content = "# Written by keytao-ime — configures IBus as the input method for KDE Plasma.\n\
-                   # Do NOT edit; this file is managed automatically.\n\
-                   export QT_IM_MODULE=ibus\n\
-                   export GTK_IM_MODULE=ibus\n\
-                   export XMODIFIERS=@im=ibus\n";
-    match std::fs::write(&env_file, content) {
-        Ok(()) => tracing::info!(
-            "KDE IBus env written to {}. \
-             Log out and back in for Qt/GTK apps to use KeyTao.",
-            env_file.display()
-        ),
-        Err(e) => tracing::warn!("Cannot write KDE env file {}: {e}", env_file.display()),
+        .join("env")
+        .join("keytao.sh");
+    if env_file.exists() {
+        match std::fs::remove_file(&env_file) {
+            Ok(()) => tracing::info!(
+                "Removed legacy KDE IBus env file {} to avoid overriding KWin Virtual Keyboard routing",
+                env_file.display()
+            ),
+            Err(e) => tracing::warn!("Cannot remove KDE env file {}: {e}", env_file.display()),
+        }
     }
 }
 
@@ -239,10 +230,11 @@ fn main() {
         // so the wayland backend is selected even on KDE.
         let is_kde = !kwin_socket && desktop.split(':').any(|s| s == "kde");
 
-        // Write the plasma-workspace env file so Qt/GTK3 apps use IBus on KDE,
-        // but only when running as the ordinary (non-KWin-spawned) daemon.
+        // A standalone KDE daemon plus plasma-workspace IBus env overrides
+        // conflicts with KWin Virtual Keyboard mode. Clean up legacy files
+        // instead of reasserting them.
         if is_kde && !kwin_socket && !requested_backends.any() {
-            write_kde_env_file();
+            remove_legacy_kde_env_file();
         }
 
         if kwin_socket {

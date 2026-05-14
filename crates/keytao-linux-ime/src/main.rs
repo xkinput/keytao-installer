@@ -3,6 +3,8 @@
 #[cfg(target_os = "linux")]
 mod engine;
 #[cfg(target_os = "linux")]
+mod gnome_ibus_engine;
+#[cfg(target_os = "linux")]
 mod ibus_backend;
 #[cfg(target_os = "linux")]
 mod panel;
@@ -17,6 +19,9 @@ struct BackendSelection {
     wayland: bool,
     xim: bool,
     ibus: bool,
+    /// Run as a standalone IBus engine that connects to an existing ibus-daemon
+    /// (used on GNOME or when launched by ibus-daemon via a component XML).
+    ibus_engine: bool,
 }
 
 #[cfg(target_os = "linux")]
@@ -26,6 +31,14 @@ impl BackendSelection {
         let mut explicit = false;
 
         for arg in args {
+            if arg == "--ibus-engine" {
+                // Launched by ibus-daemon as a standalone engine process.
+                // Override everything and run in IBus engine mode only.
+                return Ok(Self {
+                    ibus_engine: true,
+                    ..Default::default()
+                });
+            }
             if let Some(value) = arg.strip_prefix("--backend=") {
                 explicit = true;
                 selection = Self::parse_list(value)?;
@@ -71,33 +84,46 @@ impl BackendSelection {
         Ok(selection)
     }
 
-    fn for_session(has_wayland: bool, has_x11: bool) -> Self {
+    fn for_session(has_wayland: bool, has_x11: bool, is_gnome: bool) -> Self {
+        if is_gnome {
+            // GNOME does not support zwp_input_method_manager_v2.
+            // Use the IBus engine backend which connects to GNOME's ibus-daemon,
+            // plus XIM for any XWayland apps.
+            return Self {
+                ibus_engine: true,
+                xim: has_x11,
+                ..Default::default()
+            };
+        }
         match (has_wayland, has_x11) {
             (true, true) => Self {
                 wayland: true,
                 xim: true,
                 ibus: true,
+                ..Default::default()
             },
             (true, false) => Self {
                 wayland: true,
-                xim: false,
-                ibus: false,
+                ..Default::default()
             },
             (false, true) => Self {
-                wayland: false,
                 xim: true,
                 ibus: true,
+                ..Default::default()
             },
             (false, false) => Self::default(),
         }
     }
 
     fn any(self) -> bool {
-        self.wayland || self.xim || self.ibus
+        self.wayland || self.xim || self.ibus || self.ibus_engine
     }
 
     fn describe(self) -> String {
         let mut parts = Vec::new();
+        if self.ibus_engine {
+            parts.push("ibus-engine");
+        }
         if self.wayland {
             parts.push("wayland");
         }
@@ -153,10 +179,23 @@ fn main() {
 
         let has_wayland = std::env::var_os("WAYLAND_DISPLAY").is_some();
         let has_x11 = std::env::var_os("DISPLAY").is_some();
-        let selected = if requested_backends.any() {
+
+        let desktop = std::env::var("XDG_CURRENT_DESKTOP")
+            .unwrap_or_default()
+            .to_lowercase();
+        let is_gnome = desktop
+            .split(':')
+            .any(|s| matches!(s, "gnome" | "unity" | "budgie" | "pantheon" | "x-cinnamon"));
+        let is_kde = desktop.split(':').any(|s| s == "kde");
+
+        // --ibus-engine flag means we were launched by ibus-daemon itself — skip
+        // auto-detection and run only as an IBus engine.
+        let selected = if requested_backends.ibus_engine {
+            requested_backends
+        } else if requested_backends.any() {
             requested_backends
         } else {
-            BackendSelection::for_session(has_wayland, has_x11)
+            BackendSelection::for_session(has_wayland, has_x11, is_gnome)
         };
 
         if !selected.any() {
@@ -185,18 +224,47 @@ fn main() {
         }
 
         tracing::info!(
-            "display server: wayland={} x11={} — selected backends [{}]",
+            "display server: wayland={} x11={} desktop={:?} — selected backends [{}]",
             has_wayland,
             has_x11,
+            std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default(),
             selected.describe(),
         );
 
+        if selected.ibus_engine {
+            // Run as an IBus engine connecting to the existing ibus-daemon.
+            // This is the correct path for GNOME Wayland.
+            tracing::info!(
+                "GNOME/IBus engine mode: connecting to existing ibus-daemon. \
+                 Activate via GNOME Settings → Keyboard → Input Sources → Add (Other → Chinese → KeyTao), \
+                 or via ibus-setup."
+            );
+            tokio::runtime::Runtime::new()
+                .expect("tokio runtime")
+                .block_on(gnome_ibus_engine::run(engine));
+            return;
+        }
+
         if selected.wayland {
-            wayland_backend::run(engine);
-        } else {
-            loop {
-                std::thread::park();
+            match wayland_backend::run(engine) {
+                Ok(()) => {
+                    if is_kde {
+                        tracing::info!(
+                            "KDE detected: Wayland IME slot unavailable. \
+                             IBus/XIM backends are active. To use the Wayland backend \
+                             go to System Settings → Input Devices → Virtual Keyboard \
+                             and set it to None, then restart keytao-ime."
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("Wayland backend stopped: {e}");
+                }
             }
+        }
+        // Keep the process alive so IBus/XIM threads can serve apps.
+        loop {
+            std::thread::park();
         }
     }
 }

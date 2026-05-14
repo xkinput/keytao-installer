@@ -91,6 +91,7 @@ struct App {
     seat: Option<WlSeat>,
     ime_manager: Option<ZwpInputMethodManagerV2>,
     virtual_keyboard_manager: Option<ZwpVirtualKeyboardManagerV1>,
+    wayland_unavailable: bool,
 
     input_method: Option<ZwpInputMethodV2>,
     keyboard_grab: Option<ZwpInputMethodKeyboardGrabV2>,
@@ -150,6 +151,7 @@ impl App {
             ime_state: None,
             ascii_mode: false,
             mode_hint_until: None,
+            wayland_unavailable: false,
         }
     }
 
@@ -560,11 +562,18 @@ impl Dispatch<ZwpInputMethodV2, ()> for App {
                 state.serial = state.serial.wrapping_add(1);
             }
             zwp_input_method_v2::Event::Unavailable => {
-                tracing::error!(
-                    "input method unavailable — another IME is already running, \
-                     or compositor does not support zwp_input_method_v2"
+                // KDE Plasma: this fires when another IME (Fcitx5, IBus, Maliit) already
+                // holds the input-method slot, OR if "Virtual Keyboard" in System Settings
+                // → Input Devices is not set to "None".  Signal the event loop to exit
+                // gracefully so the IBus/XIM threads keep running for KDE apps.
+                tracing::warn!(
+                    "zwp_input_method_v2: Unavailable — Wayland backend shutting down. \
+                     On KDE Plasma: disable the virtual keyboard under System Settings \
+                     → Input Devices → Virtual Keyboard and make sure no other IME \
+                     (fcitx5, ibus) is running. The IBus/XIM backends will continue \
+                     serving apps via QT_IM_MODULE/XMODIFIERS."
                 );
-                std::process::exit(1);
+                state.wayland_unavailable = true;
             }
             _ => {}
         }
@@ -677,33 +686,34 @@ delegate_noop!(App: ignore ZwpVirtualKeyboardV1);
 
 // ── Entry point ────────────────────────────────────────────────────────────────
 
-pub fn run(engine: CoreEngine) {
-    let session = match engine.create_session() {
-        Ok(session) => session,
-        Err(e) => {
-            tracing::error!("failed to create Wayland Rime session: {e}");
-            std::process::exit(1);
-        }
-    };
+/// Returns Ok(()) when the Wayland input-method slot is unavailable (e.g. KDE
+/// virtual keyboard is active) so the caller can keep IBus/XIM threads alive.
+pub fn run(engine: CoreEngine) -> Result<(), String> {
+    let session = engine
+        .create_session()
+        .map_err(|e| format!("failed to create Wayland Rime session: {e}"))?;
 
-    let conn = Connection::connect_to_env().expect("Wayland connection");
-    let (globals, mut queue) = registry_queue_init::<App>(&conn).expect("registry");
+    let conn = Connection::connect_to_env().map_err(|e| format!("Wayland connection: {e}"))?;
+    let (globals, mut queue) =
+        registry_queue_init::<App>(&conn).map_err(|e| format!("registry: {e}"))?;
     let qh = queue.handle();
 
     let compositor: WlCompositor = globals
         .bind(&qh, 1..=4, ())
-        .expect("wl_compositor not advertised");
-    let shm: WlShm = globals.bind(&qh, 1..=1, ()).expect("wl_shm not advertised");
+        .map_err(|e| format!("wl_compositor not advertised: {e}"))?;
+    let shm: WlShm = globals
+        .bind(&qh, 1..=1, ())
+        .map_err(|e| format!("wl_shm not advertised: {e}"))?;
     let seat: WlSeat = globals
         .bind(&qh, 1..=7, ())
-        .expect("wl_seat not advertised");
-    let ime_manager: ZwpInputMethodManagerV2 = globals.bind(&qh, 1..=1, ()).unwrap_or_else(|_| {
-        tracing::error!(
-            "compositor does not advertise zwp_input_method_manager_v2; \
-                 try a wlroots compositor (sway, niri, river, etc.)"
-        );
-        std::process::exit(1);
-    });
+        .map_err(|e| format!("wl_seat not advertised: {e}"))?;
+    let ime_manager: ZwpInputMethodManagerV2 = globals.bind(&qh, 1..=1, ()).map_err(|_| {
+        // KDE Plasma < 5.24 does not implement this protocol; Plasma 5.24+ does.
+        "compositor does not advertise zwp_input_method_manager_v2 \
+         (KDE Plasma < 5.24, GNOME Shell without the mutter fork, or a compositor \
+         that does not implement the Wayland input-method-v2 protocol)"
+            .to_string()
+    })?;
     let virtual_keyboard_manager: Option<ZwpVirtualKeyboardManagerV1> = globals
         .bind(&qh, 1..=1, ())
         .map_err(|e| {
@@ -728,6 +738,11 @@ pub fn run(engine: CoreEngine) {
 
     tracing::info!("Wayland IME running (popup-surface positioning)");
     loop {
+        if app.wayland_unavailable {
+            tracing::info!("Wayland IME exiting gracefully (slot unavailable)");
+            return Ok(());
+        }
+
         if app
             .mode_hint_until
             .is_some_and(|deadline| Instant::now() >= deadline)
@@ -736,7 +751,9 @@ pub fn run(engine: CoreEngine) {
             app.show_panel(ImeState::empty(), &qh);
         }
 
-        queue.flush().expect("flush");
+        if let Err(e) = queue.flush() {
+            tracing::warn!("Wayland flush error: {e}");
+        }
         let timeout_ms = if app.mode_hint_until.is_some() {
             100
         } else {
@@ -750,7 +767,10 @@ pub fn run(engine: CoreEngine) {
         };
         let ready = unsafe { libc::poll(&mut pfd as *mut libc::pollfd, 1, timeout_ms) };
         if ready > 0 {
-            queue.blocking_dispatch(&mut app).expect("dispatch");
+            if let Err(e) = queue.blocking_dispatch(&mut app) {
+                tracing::warn!("Wayland dispatch error: {e}");
+                return Err(format!("Wayland connection closed: {e}"));
+            }
         } else if ready < 0 {
             tracing::warn!("Wayland poll failed");
         }

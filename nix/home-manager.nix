@@ -8,24 +8,24 @@
 }:
 
 let
-  cfg = config.programs.keytao-installer;
+  cfg = config.programs.keytao-app;
   system = pkgs.stdenv.hostPlatform.system;
   package = self.packages.${system}.default;
   hasNiri = options ? programs && options.programs ? niri && options.programs.niri ? settings;
 in
 {
-  options.programs.keytao-installer = {
+  options.programs.keytao-app = {
     enable = lib.mkOption {
       type = lib.types.bool;
       default = pkgs.stdenv.isLinux;
-      description = "Install KeyTao installer and the keytao-ime Linux daemon.";
+      description = "Install the KeyTao app and the keytao-ime Linux daemon.";
     };
 
     package = lib.mkOption {
       type = lib.types.package;
       default = package;
-      defaultText = "inputs.keytao-installer.packages.${system}.default";
-      description = "Package providing keytao-installer and keytao-ime.";
+      defaultText = "inputs.keytao-app.packages.${system}.default";
+      description = "Package providing keytao-app and keytao-ime.";
     };
 
     kde = lib.mkOption {
@@ -49,7 +49,7 @@ in
     autostart = lib.mkOption {
       type = lib.types.bool;
       default = pkgs.stdenv.isLinux;
-      description = "Start keytao-installer automatically for desktop sessions.";
+      description = "Start keytao-app automatically for desktop sessions.";
     };
   };
 
@@ -87,13 +87,13 @@ in
 
       (lib.mkIf (cfg.autostart && hasNiri) {
         programs.niri.settings.spawn-at-startup = [
-          { command = [ "${cfg.package}/bin/keytao-installer" ]; }
+          { command = [ "${cfg.package}/bin/keytao-app" ]; }
         ];
       })
 
       (lib.mkIf (cfg.autostart && !hasNiri) {
-        xdg.configFile."autostart/keytao-installer.desktop".source =
-          "${cfg.package}/share/applications/keytao-installer.desktop";
+        xdg.configFile."autostart/keytao-app.desktop".source =
+          "${cfg.package}/share/applications/keytao-app.desktop";
       })
 
       (lib.mkIf (cfg.setInputMethodEnvironment && hasNiri) {

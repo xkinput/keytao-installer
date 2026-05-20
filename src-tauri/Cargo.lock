@@ -2251,7 +2251,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "keytao-installer"
+name = "keytao-app"
 version = "0.1.0"
 dependencies = [
  "dirs 5.0.1",

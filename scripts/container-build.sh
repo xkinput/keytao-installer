@@ -15,6 +15,6 @@ export KEYTAO_IME_PATH=/app/target/release/keytao-ime
 export TAURI_CONFIG='{"bundle":{"externalBin":["binaries/keytao-ime"]}}'
 pnpm tauri build --bundles deb
 VERSION=$(node -p "require('./package.json').version")
-tar -czf "target/release/bundle/keytao-installer-${VERSION}-linux-x86_64.tar.gz" \
-  -C target/release keytao-installer keytao-ime
+tar -czf "target/release/bundle/keytao-app-${VERSION}-linux-x86_64.tar.gz" \
+  -C target/release keytao-app keytao-ime
 chown -R "$UID_GID" /app/target /app/dist 2>/dev/null || true

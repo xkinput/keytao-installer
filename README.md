@@ -1,6 +1,6 @@
-# 键道安装器
+# 键道
 
-键道输入方案的一键安装工具，基于 [Tauri](https://tauri.app/) 构建，支持桌面端与 Android。
+键道输入方案与配套工具，基于 [Tauri](https://tauri.app/) 构建，支持桌面端与 Android。
 
 ## 功能
 
@@ -22,7 +22,7 @@
 
 ## 下载
 
-前往 [Releases](https://github.com/xkinput/keytao-installer/releases) 下载对应平台的安装包。
+前往 [Releases](https://github.com/xkinput/keytao-app/releases) 下载对应平台的安装包。
 
 ---
 
@@ -30,11 +30,11 @@
 
 ### AppImage / deb
 
-从 [Releases](https://github.com/xkinput/keytao-installer/releases) 下载后直接运行（AppImage 无需安装）：
+从 [Releases](https://github.com/xkinput/keytao-app/releases) 下载后直接运行（AppImage 无需安装）：
 
 ```bash
-chmod +x keytao-installer_*.AppImage
-./keytao-installer_*.AppImage
+chmod +x keytao-app_*.AppImage
+./keytao-app_*.AppImage
 ```
 
 ### NixOS / nix-darwin（推荐）
@@ -44,8 +44,8 @@ chmod +x keytao-installer_*.AppImage
 **1. 在 `flake.nix` 中添加 input**
 
 ```nix
-inputs.keytao-installer = {
-  url = "github:xkinput/keytao-installer";
+inputs.keytao-app = {
+  url = "github:xkinput/keytao-app";
   inputs.nixpkgs.follows = "nixpkgs";
 };
 ```
@@ -53,7 +53,7 @@ inputs.keytao-installer = {
 **2. 使用 Home Manager 一句安装**
 
 ```nix
-imports = [ inputs.keytao-installer.homeManagerModules.default ];
+imports = [ inputs.keytao-app.homeManagerModules.default ];
 ```
 
 模块会安装 GUI + `keytao-ime` daemon，并在支持 `programs.niri` 的配置中自动加入启动项和输入法环境变量。
@@ -62,17 +62,17 @@ imports = [ inputs.keytao-installer.homeManagerModules.default ];
 
 ```nix
 # home.packages（或 environment.systemPackages）
-inputs.keytao-installer.packages.${pkgs.stdenv.hostPlatform.system}.default
+inputs.keytao-app.packages.${pkgs.stdenv.hostPlatform.system}.default
 ```
 
 ---
 
 ## Linux IME 架构
 
-Linux 下只有一个协议入口：`keytao-ime`。GUI 安装器只负责下载、合并和部署 Rime 配置，并在启动时确保 `keytao-ime` 已运行。
+Linux 下只有一个协议入口：`keytao-ime`。GUI 应用只负责下载、合并和部署 Rime 配置，并在启动时确保 `keytao-ime` 已运行。
 
 ```
-keytao-installer（Tauri GUI）
+keytao-app（Tauri GUI）
   └── 部署 Rime 资源并启动 keytao-ime
 
 keytao-ime（Linux IME daemon）
@@ -86,7 +86,7 @@ keytao-ime（Linux IME daemon）
 
 ### Wayland（原生应用）
 
-启动 `keytao-installer` 或直接启动 `keytao-ime`。GTK 应用会通过 `text-input-v3` 协议自动连接；Electron 应用需要设置以下环境变量：
+启动 `keytao-app` 或直接启动 `keytao-ime`。GTK 应用会通过 `text-input-v3` 协议自动连接；Electron 应用需要设置以下环境变量：
 
 ```
 NIXOS_OZONE_WL=1
@@ -106,7 +106,7 @@ XMODIFIERS=@im=keytao <your-app>
 ```nix
 programs.niri.settings = {
   spawn-at-startup = [
-    { command = [ "keytao-installer" ]; }
+    { command = [ "keytao-app" ]; }
   ];
 
   environment = {

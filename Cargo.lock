@@ -2530,25 +2530,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "keytao-core"
-version = "0.1.0"
-dependencies = [
- "dirs 5.0.1",
- "rime-api",
- "serde",
- "serde_yaml",
-]
-
-[[package]]
-name = "keytao-core-ffi"
-version = "0.1.0"
-dependencies = [
- "cbindgen",
- "keytao-core",
-]
-
-[[package]]
-name = "keytao-installer"
+name = "keytao-app"
 version = "0.0.16-alpha"
 dependencies = [
  "cosmic-text",
@@ -2575,6 +2557,24 @@ dependencies = [
  "wayland-protocols-misc",
  "xkbcommon",
  "zip",
+]
+
+[[package]]
+name = "keytao-core"
+version = "0.1.0"
+dependencies = [
+ "dirs 5.0.1",
+ "rime-api",
+ "serde",
+ "serde_yaml",
+]
+
+[[package]]
+name = "keytao-core-ffi"
+version = "0.1.0"
+dependencies = [
+ "cbindgen",
+ "keytao-core",
 ]
 
 [[package]]

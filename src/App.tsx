@@ -36,7 +36,7 @@ import {
 type OSType = "windows" | "macos" | "linux" | "android" | "ios" | "unknown"
 type Tab = "install" | "extension" | "about"
 
-interface InstallerUpdateInfo {
+interface AppUpdateInfo {
   current_version: string
   latest_version: string
   has_update: boolean
@@ -182,7 +182,7 @@ export default function App() {
   const [releaseError, setReleaseError] = useState<string | null>(null)
   const [isFetchingRelease, setIsFetchingRelease] = useState(true)
   const [downloadSource, setDownloadSource] = useState<DownloadSource>("gitee")
-  const [installerUpdate, setInstallerUpdate] = useState<InstallerUpdateInfo | null>(null)
+  const [appUpdate, setAppUpdate] = useState<AppUpdateInfo | null>(null)
 
   // macOS IME
   const [imeInstalled, setImeInstalled] = useState(false)
@@ -248,8 +248,8 @@ export default function App() {
       .catch((e) => setReleaseError(String(e)))
       .finally(() => setIsFetchingRelease(false))
 
-    invoke<InstallerUpdateInfo>("check_installer_update")
-      .then((info) => { if (info.has_update) setInstallerUpdate(info) })
+    invoke<AppUpdateInfo>("check_app_update")
+      .then((info) => { if (info.has_update) setAppUpdate(info) })
       .catch(() => { })
 
     invoke<string | null>("rime_get_data_dir")
@@ -517,31 +517,31 @@ export default function App() {
 
         {/* Header */}
         <div className="flex items-center gap-3 pb-1">
-          <img src="/logo.png" alt="键道输入法" className="h-12 w-12" />
+          <img src="/logo.png" alt="KeyTao" className="h-12 w-12" />
           <div>
             <h1 className="text-xl font-bold tracking-tight leading-tight">
-              键道输入法
+              KeyTao
               {appVersion && <span className="ml-2 text-sm font-normal text-muted-foreground">v{appVersion}</span>}
             </h1>
-            <p className="text-xs text-muted-foreground">基于 librime 的跨平台原生输入法</p>
+            <p className="text-xs text-muted-foreground">键道，基于 librime 的跨平台原生输入法</p>
           </div>
         </div>
 
-        {/* Installer update banner */}
-        {installerUpdate && (
+        {/* App update banner */}
+        {appUpdate && (
           <a
-            href={installerUpdate.release_url}
+            href={appUpdate.release_url}
             target="_blank"
             rel="noreferrer"
             className="flex items-center justify-between gap-3 px-4 py-2.5 rounded-lg border border-primary/30 bg-primary/5 text-sm hover:bg-primary/10 transition-colors"
           >
             <div className="flex items-center gap-2">
               <Download className="h-4 w-4 text-primary shrink-0" />
-              <span>安装器有新版本可用</span>
-              <Badge variant="secondary" className="font-mono text-xs">v{installerUpdate.latest_version}</Badge>
+              <span>KeyTao 有新版本可用</span>
+              <Badge variant="secondary" className="font-mono text-xs">v{appUpdate.latest_version}</Badge>
             </div>
             <div className="flex items-center gap-2 text-muted-foreground text-xs shrink-0">
-              <span>当前 v{installerUpdate.current_version}</span>
+              <span>当前 v{appUpdate.current_version}</span>
               <ExternalLink className="h-3 w-3" />
             </div>
           </a>
@@ -837,7 +837,7 @@ export default function App() {
             <CardContent className="space-y-3">
               <div className="rounded-lg border border-border overflow-hidden">
                 {[
-                  ["安装器版本", componentVersions?.app_version ?? (appVersion || "unknown")],
+                  ["KeyTao 版本", componentVersions?.app_version ?? (appVersion || "unknown")],
                   ["Tauri 版本", componentVersions?.tauri_version ?? "unknown"],
                   ["librime 版本", componentVersions?.librime_version ?? "unknown"],
                   ["OpenCC 版本", componentVersions?.opencc_version ?? "unknown"],

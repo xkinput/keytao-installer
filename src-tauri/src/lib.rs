@@ -221,7 +221,7 @@ fn keytao_ime_process_lines() -> Vec<String> {
 fn build_client(app: &AppHandle) -> Result<reqwest::Client, String> {
     let version = app.package_info().version.to_string();
     reqwest::Client::builder()
-        .user_agent(format!("keytao-installer/{version}"))
+        .user_agent(format!("keytao-app/{version}"))
         .connect_timeout(std::time::Duration::from_secs(8))
         .build()
         .map_err(|e| e.to_string())
@@ -930,7 +930,7 @@ fn scoped_storage_plugin<R: tauri::Runtime>() -> tauri::plugin::TauriPlugin<R> {
             #[cfg(target_os = "android")]
             {
                 let handle =
-                    api.register_android_plugin("ink.rea.keytao_installer", "ScopedStoragePlugin")?;
+                    api.register_android_plugin("ink.rea.keytao_app", "ScopedStoragePlugin")?;
                 app.manage(ScopedStorageHandle(handle));
             }
             Ok(())
@@ -1156,7 +1156,7 @@ async fn android_smart_extract<R: tauri::Runtime>(
 }
 
 #[derive(Serialize)]
-pub struct InstallerUpdateInfo {
+pub struct AppUpdateInfo {
     pub current_version: String,
     pub latest_version: String,
     pub has_update: bool,
@@ -1164,33 +1164,33 @@ pub struct InstallerUpdateInfo {
 }
 
 #[tauri::command]
-async fn check_installer_update(app: AppHandle) -> Result<InstallerUpdateInfo, String> {
+async fn check_app_update(app: AppHandle) -> Result<AppUpdateInfo, String> {
     let t0 = std::time::Instant::now();
-    tracing::info!("[check_installer_update] start");
+    tracing::info!("[check_app_update] start");
     let current = app.package_info().version.to_string();
     let client = build_client(&app)?;
     let resp = client
-        .get("https://api.github.com/repos/xkinput/keytao-installer/releases/latest")
+        .get("https://api.github.com/repos/xkinput/keytao-app/releases/latest")
         .timeout(std::time::Duration::from_secs(8))
         .send()
         .await
         .map_err(|e| {
             tracing::warn!(
-                "[check_installer_update] failed after {}ms: {e}",
+                "[check_app_update] failed after {}ms: {e}",
                 t0.elapsed().as_millis()
             );
             e.to_string()
         })?;
     let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
     tracing::info!(
-        "[check_installer_update] done in {}ms",
+        "[check_app_update] done in {}ms",
         t0.elapsed().as_millis()
     );
     let latest_tag = json["tag_name"].as_str().unwrap_or("").to_string();
     let latest = latest_tag.trim_start_matches('v').to_string();
     let release_url = json["html_url"].as_str().unwrap_or("").to_string();
     let has_update = !latest.is_empty() && latest != current;
-    Ok(InstallerUpdateInfo {
+    Ok(AppUpdateInfo {
         current_version: current,
         latest_version: latest,
         has_update,
@@ -1234,7 +1234,7 @@ async fn macos_install_ime(app: AppHandle) -> Result<(), String> {
 
     if !src.exists() {
         return Err(
-            "IME bundle (KeyTao.app) not found in resources — run `crates/keytao-macos-ime/build.sh` first and rebuild the installer".into(),
+            "IME bundle (KeyTao.app) not found in resources — run `crates/keytao-macos-ime/build.sh` first and rebuild the app".into(),
         );
     }
 
@@ -1632,7 +1632,7 @@ pub fn run() {
 
     builder
         .invoke_handler(tauri::generate_handler![
-            check_installer_update,
+            check_app_update,
             fetch_latest_release,
             get_component_versions,
             select_directory,

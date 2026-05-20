@@ -4,7 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 DIST_DIR="$PROJECT_DIR/dist"
-IMAGE="keytao-installer-builder"
+IMAGE="keytao-app-builder"
 
 if ! command -v docker >/dev/null 2>&1; then
   echo "docker not found. Install Docker: https://docs.docker.com/engine/install/" >&2
@@ -22,8 +22,8 @@ _gid=$(id -g)
 docker run --rm \
   --network=host \
   -v "$PROJECT_DIR":/app \
-  -v keytao-installer-cargo:/root/.cargo/registry \
-  -v keytao-installer-cargo-git:/root/.cargo/git \
+  -v keytao-app-cargo:/root/.cargo/registry \
+  -v keytao-app-cargo-git:/root/.cargo/git \
   -w /app \
   "$IMAGE" \
   sh /app/scripts/container-build.sh "$_uid" "$_gid"

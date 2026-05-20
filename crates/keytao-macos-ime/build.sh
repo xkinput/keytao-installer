@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# build.sh — builds KeyTao.app and an optional KeyTao.pkg installer
+# build.sh — builds KeyTao.app and an optional KeyTao.pkg package
 # Usage: ./build.sh [--release | --debug]
 set -euo pipefail
 
@@ -98,7 +98,7 @@ echo ""
 echo "==> Build complete: $APP"
 
 echo ""
-echo "==> Building .pkg installer (installs via system_installd, no provenance xattr)..."
+echo "==> Building .pkg package (installs via system_installd, no provenance xattr)..."
 PKG_PAYLOAD="$BUILD_DIR/pkg_payload"
 PKG_SCRIPTS="$BUILD_DIR/pkg_scripts"
 rm -rf "$PKG_PAYLOAD" "$PKG_SCRIPTS"
@@ -123,7 +123,7 @@ chmod +x "$PKG_SCRIPTS/postinstall"
 pkgbuild \
     --root "$PKG_PAYLOAD" \
     --scripts "$PKG_SCRIPTS" \
-    --identifier "ink.rea.keytao-ime-installer" \
+    --identifier "ink.rea.keytao-ime-package" \
     --version "1.0.0" \
     --install-location "/" \
     "$BUILD_DIR/KeyTao.pkg" 2>&1

@@ -86,7 +86,7 @@ ImeState { preedit, candidates, committed, ... }
 The compositor must support `zwp_input_method_v2` (KDE Plasma ≥ 5.24, Sway ≥ 1.7, Wayfire, river).
 
 ```sh
-# Launch (usually handled by the installer's autostart entry)
+# Launch (usually handled by the app autostart entry)
 keytao-ime
 ```
 

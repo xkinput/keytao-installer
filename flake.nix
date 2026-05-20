@@ -92,14 +92,14 @@
           '';
         };
 
-        keytaoInstallerBin = pkgs.rustPlatform.buildRustPackage (finalAttrs: {
-          pname = "keytao-installer";
+        keytaoAppBin = pkgs.rustPlatform.buildRustPackage (finalAttrs: {
+          pname = "keytao-app";
           inherit version;
           src = pkgs.lib.cleanSource ./.;
           cargoLock.lockFile = ./Cargo.lock;
           cargoBuildFlags = [
             "--package"
-            "keytao-installer"
+            "keytao-app"
             "--features"
             "custom-protocol"
           ];
@@ -147,7 +147,7 @@
         });
 
         fhsEnv = pkgs.buildFHSEnv {
-          name = "keytao-installer-unwrapped";
+          name = "keytao-app-unwrapped";
           targetPkgs =
             p: with p; [
               webkitgtk_4_1
@@ -171,10 +171,10 @@
               xorg.libxcb
               wayland
             ];
-          runScript = "${keytaoInstallerBin}/bin/keytao-installer";
+          runScript = "${keytaoAppBin}/bin/keytao-app";
         };
 
-        keytaoInstallerLauncher = pkgs.writeShellScriptBin "keytao-installer" ''
+        keytaoAppLauncher = pkgs.writeShellScriptBin "keytao-app" ''
           export DISPLAY="''${DISPLAY:-:0}"
           export XMODIFIERS="''${XMODIFIERS:-@im=keytao}"
           export GTK_IM_MODULE="''${GTK_IM_MODULE:-wayland}"
@@ -182,36 +182,36 @@
           export GDK_BACKEND="''${GDK_BACKEND:-wayland}"
           export WEBKIT_DISABLE_DMABUF_RENDERER="''${WEBKIT_DISABLE_DMABUF_RENDERER:-1}"
 
-          exec ${fhsEnv}/bin/keytao-installer-unwrapped "$@"
+          exec ${fhsEnv}/bin/keytao-app-unwrapped "$@"
         '';
 
         desktopItem = pkgs.makeDesktopItem {
-          name = "keytao-installer";
-          exec = "${keytaoInstallerLauncher}/bin/keytao-installer %U";
-          icon = "keytao-installer";
-          desktopName = "键道安装器";
-          comment = "Keytao IME installer";
+          name = "keytao-app";
+          exec = "${keytaoAppLauncher}/bin/keytao-app %U";
+          icon = "keytao-app";
+          desktopName = "键道";
+          comment = "KeyTao";
           categories = [ "Utility" ];
         };
 
-        iconPkg = pkgs.runCommand "keytao-installer-icon" { } ''
+        iconPkg = pkgs.runCommand "keytao-app-icon" { } ''
           mkdir -p $out/share/icons/hicolor/128x128/apps
-          cp ${self}/src-tauri/icons/128x128.png $out/share/icons/hicolor/128x128/apps/keytao-installer.png
+          cp ${self}/src-tauri/icons/128x128.png $out/share/icons/hicolor/128x128/apps/keytao-app.png
         '';
 
-        keytaoInstallerPkg = pkgs.symlinkJoin {
-          name = "keytao-installer";
+        keytaoAppPkg = pkgs.symlinkJoin {
+          name = "keytao-app";
           paths = [
-            keytaoInstallerLauncher
+            keytaoAppLauncher
             desktopItem
             iconPkg
           ];
         };
 
         keytaoBundlePkg = pkgs.symlinkJoin {
-          name = "keytao-installer";
+          name = "keytao-app";
           paths = [
-            keytaoInstallerPkg
+            keytaoAppPkg
             keytaoLinuxIme
           ];
         };
@@ -222,7 +222,7 @@
 
         apps.default = {
           type = "app";
-          program = "${keytaoBundlePkg}/bin/keytao-installer";
+          program = "${keytaoBundlePkg}/bin/keytao-app";
         };
 
         devShells.default = pkgs.mkShell {

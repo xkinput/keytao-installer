@@ -66,8 +66,8 @@
           buildInputs = with pkgs; [
             librime
             libxkbcommon
-            xorg.libxcb
-            xorg.libX11
+            libxcb
+            libx11
             dbus
             glib
             gtk3
@@ -119,8 +119,8 @@
           buildInputs = with pkgs; [
             librime
             libxkbcommon
-            xorg.libxcb
-            xorg.libX11
+            libxcb
+            libx11
             dbus
             glib
             gtk3
@@ -167,8 +167,8 @@
               libxkbcommon
               libsoup_3
               freetype
-              xorg.libX11
-              xorg.libxcb
+              libx11
+              libxcb
               wayland
             ];
           runScript = "${keytaoAppBin}/bin/keytao-app";
@@ -246,7 +246,7 @@
           # without needing patchelf.
           buildInputs = with pkgs; [
             librime
-            xorg.libxcb
+            libxcb
             libxkbcommon
             wayland
             dbus
@@ -285,7 +285,7 @@
             with pkgs;
             [
               librime
-              xorg.libxcb
+              libxcb
               libxkbcommon
               wayland
               dbus
@@ -317,8 +317,8 @@
               zlib
               glibc
               fuse3
-              xorg.libX11
-              xorg.libxcb
+              libx11
+              libxcb
               libxkbcommon
               wayland
               glib
@@ -395,7 +395,7 @@
                                         with pkgs;
                                         [
                                           librime
-                                          xorg.libxcb
+                                          libxcb
                                           libxkbcommon
                                           wayland
                                           dbus

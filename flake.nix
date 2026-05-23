@@ -346,11 +346,13 @@
                         export MOLD_PATH="${pkgs.mold}/bin/mold"
                         export CARGO_INCREMENTAL=0
 
-                        # Generate GTK IM Modules cache so Tauri (WebKitGTK) can actually load xim/ibus/wayland modules
+                        # Generate GTK IM Modules cache safely so direnv doesn't destroy it
                         export GTK_PATH="${pkgs.gtk3}/lib/gtk-3.0/3.0.0:${pkgs.ibus}/lib/gtk-3.0/3.0.0"
                         _immodules_cache="$HOME/.cache/keytao-immodules.cache"
-                        ${pkgs.gtk3}/bin/gtk-query-immodules-3.0 > "$_immodules_cache" 2>/dev/null
-                        ${pkgs.gtk3}/bin/gtk-query-immodules-3.0 ${pkgs.ibus}/lib/gtk-3.0/3.0.0/immodules/im-ibus.so >> "$_immodules_cache" 2>/dev/null
+                        if ${pkgs.gtk3}/bin/gtk-query-immodules-3.0 > "/tmp/keytao_im.tmp" 2>/dev/null; then
+                            ${pkgs.gtk3}/bin/gtk-query-immodules-3.0 ${pkgs.ibus}/lib/gtk-3.0/3.0.0/immodules/im-ibus.so >> "/tmp/keytao_im.tmp" 2>/dev/null
+                            mv "/tmp/keytao_im.tmp" "$_immodules_cache"
+                        fi
                         export GTK_IM_MODULE_FILE="$_immodules_cache"
 
                         # Add Android platform-tools (adb) and cmdline-tools to PATH

@@ -1594,11 +1594,8 @@ pub fn run() {
                 cleanup_kde_legacy_ime_files();
 
                 // Ensure the single Linux IME daemon owns Wayland, XIM, and IBus frontends.
-                if is_kde_session() {
-                    tracing::info!(
-                        "KDE session detected; not auto-starting a standalone keytao-ime daemon. \
-                         KWin Virtual Keyboard should own the Wayland IME process."
-                    );
+                if false {
+                    tracing::info!("Disabled KDE check");
                 } else {
                     let (mut ime_cmd, ime_display) = resolve_keytao_ime_command(app.handle());
                     let same_binary_running = is_same_keytao_ime_running(&ime_display);

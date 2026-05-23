@@ -55,8 +55,14 @@ in
 
     autostart = lib.mkOption {
       type = lib.types.bool;
-      default = pkgs.stdenv.isLinux;
+      default = false;
       description = "Start keytao-app automatically for desktop sessions.";
+    };
+
+    autostartDaemon = lib.mkOption {
+      type = lib.types.bool;
+      default = pkgs.stdenv.isLinux;
+      description = "Start keytao-ime daemon automatically via XDG autostart.";
     };
   };
 
@@ -123,6 +129,18 @@ in
       (lib.mkIf (cfg.autostart && !hasNiri) {
         xdg.configFile."autostart/keytao-app.desktop".source =
           "${cfg.package}/share/applications/keytao-app.desktop";
+      })
+
+      (lib.mkIf cfg.autostartDaemon {
+        xdg.configFile."autostart/keytao-ime.desktop".text = ''
+          [Desktop Entry]
+          Name=KeyTao IME Daemon
+          Exec=${cfg.package}/bin/keytao-ime
+          Icon=input-keyboard
+          Type=Application
+          NoDisplay=true
+          X-KDE-autostart-phase=1
+        '';
       })
 
       (lib.mkIf (cfg.setInputMethodEnvironment && hasNiri) {

@@ -80,6 +80,16 @@
           RIME_INCLUDE_DIR = "${pkgs.librime}/include";
           RIME_LIB_DIR = "${pkgs.librime}/lib";
           LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
+          # Install the KDE Virtual Keyboard desktop entry so keytao-ime appears in
+          # KDE Settings → Virtual Keyboard.  X-KDE-Wayland-VirtualKeyboard=true tells
+          # KWin to spawn the process with a private WAYLAND_SOCKET fd.
+          postInstall = ''
+            install -Dm644 \
+              crates/keytao-linux-ime/keytao-wayland-launcher.desktop \
+              $out/share/applications/keytao-wayland-launcher.desktop
+            substituteInPlace $out/share/applications/keytao-wayland-launcher.desktop \
+              --replace-fail 'Exec=keytao-ime' "Exec=$out/bin/keytao-ime"
+          '';
         };
 
         keytaoAppBin = pkgs.rustPlatform.buildRustPackage (finalAttrs: {

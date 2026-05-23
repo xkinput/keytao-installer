@@ -1,0 +1,20 @@
+[Desktop Entry]
+Name=KeyTao Input Method (Wayland)
+Name[zh_CN]=键道输入法 (Wayland)
+Name[zh_TW]=鍵道輸入法 (Wayland)
+GenericName=Input Method
+GenericName[zh_CN]=输入法
+GenericName[zh_TW]=輸入法
+Comment=KeyTao Chinese Input Method Engine (KDE Virtual Keyboard)
+Comment[zh_CN]=键道中文输入法引擎（KDE 虚拟键盘）
+Comment[zh_TW]=鍵道中文輸入法引擎（KDE 虛擬鍵盤）
+Exec=keytao-ime
+Icon=input-keyboard
+Terminal=false
+Type=Application
+Categories=System;Utility;
+StartupNotify=false
+NoDisplay=true
+OnlyShowIn=KDE
+X-KDE-StartupNotify=false
+X-KDE-Wayland-VirtualKeyboard=true

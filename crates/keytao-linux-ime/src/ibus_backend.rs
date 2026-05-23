@@ -203,6 +203,9 @@ fn ibus_lookup_table_value(state: &ImeState) -> zvariant::OwnedValue {
 
 struct InputContext {
     session: ImeSession,
+    kimpanel_ctxt: Option<SignalContext<'static>>,
+    cursor_x: Arc<AtomicI32>,
+    cursor_y: Arc<AtomicI32>,
 }
 
 #[interface(name = "org.freedesktop.IBus.InputContext")]
@@ -214,16 +217,22 @@ impl InputContext {
     async fn focus_out(&self, #[zbus(signal_context)] ctxt: SignalContext<'_>) {
         tracing::debug!("IBus InputContext: FocusOut");
         self.session.reset();
-        clear_input_context_ui(&ctxt).await;
+        clear_input_context_ui(&ctxt, &self.kimpanel_ctxt).await;
     }
 
     async fn reset(&self, #[zbus(signal_context)] ctxt: SignalContext<'_>) {
         tracing::debug!("IBus InputContext: Reset");
         self.session.reset();
-        clear_input_context_ui(&ctxt).await;
+        clear_input_context_ui(&ctxt, &self.kimpanel_ctxt).await;
     }
 
-    async fn set_cursor_location(&self, _x: i32, _y: i32, _w: i32, _h: i32) {}
+    async fn set_cursor_location(&self, x: i32, y: i32, _w: i32, _h: i32) {
+        self.cursor_x.store(x, Ordering::Relaxed);
+        self.cursor_y.store(y, Ordering::Relaxed);
+        if let Some(kctxt) = &self.kimpanel_ctxt {
+            let _ = Kimpanel::update_spot_location(kctxt, x, y).await;
+        }
+    }
     async fn set_cursor_location_relative(&self, _x: i32, _y: i32, _w: i32, _h: i32) {}
     async fn set_capabilities(&self, _caps: u32) {}
 
@@ -234,7 +243,7 @@ impl InputContext {
     ) -> zbus::fdo::Result<()> {
         tracing::debug!("IBus InputContext: Destroy");
         self.session.reset();
-        clear_input_context_ui(&ctxt).await;
+        clear_input_context_ui(&ctxt, &self.kimpanel_ctxt).await;
         server
             .remove::<InputContext, _>(ctxt.path().to_owned())
             .await
@@ -267,17 +276,20 @@ impl InputContext {
 
         let before_state = self.session.state();
         if should_bypass_empty_composition(keyval, state, &before_state) {
-            clear_input_context_ui(&ctxt).await;
+            clear_input_context_ui(&ctxt, &self.kimpanel_ctxt).await;
             return false;
         }
         if is_enter_key(keyval) && !before_state.preedit.is_empty() {
-            clear_preedit(&ctxt).await;
+            clear_preedit(&ctxt, &self.kimpanel_ctxt).await;
             let ov = ibus_text_value(&before_state.preedit);
             if let Ok(v) = zvariant::Value::try_from(&ov) {
                 let _ = Self::commit_text(&ctxt, v).await;
             }
             self.session.reset();
             let _ = Self::hide_lookup_table(&ctxt).await;
+            if let Some(kctxt) = &self.kimpanel_ctxt {
+                let _ = Kimpanel::show_lookup_table(kctxt, false).await;
+            }
             return true;
         }
         let candidate_select_index = if is_candidate_select_key(keyval) {
@@ -294,14 +306,14 @@ impl InputContext {
                 if let Some(ime_state) = self.session.select_candidate(index) {
                     if let Some(ref text) = ime_state.committed {
                         if !text.is_empty() {
-                            clear_preedit(&ctxt).await;
+                            clear_preedit(&ctxt, &self.kimpanel_ctxt).await;
                             let ov = ibus_text_value(text);
                             if let Ok(v) = zvariant::Value::try_from(&ov) {
                                 let _ = Self::commit_text(&ctxt, v).await;
                             }
                         }
                     }
-                    clear_input_context_ui(&ctxt).await;
+                    clear_input_context_ui(&ctxt, &self.kimpanel_ctxt).await;
                     return true;
                 }
             }
@@ -319,7 +331,7 @@ impl InputContext {
         if let Some(ref text) = ime_state.committed {
             if !text.is_empty() {
                 tracing::debug!("IBus CommitText: {text:?}");
-                clear_preedit(&ctxt).await;
+                clear_preedit(&ctxt, &self.kimpanel_ctxt).await;
                 let ov = ibus_text_value(text);
                 if let Ok(v) = zvariant::Value::try_from(&ov) {
                     let _ = Self::commit_text(&ctxt, v).await;
@@ -329,20 +341,52 @@ impl InputContext {
 
         if ime_state.preedit.is_empty() {
             let _ = Self::hide_preedit_text(&ctxt).await;
+            if let Some(kctxt) = &self.kimpanel_ctxt {
+                let _ = Kimpanel::show_preedit_text(kctxt, false).await;
+            }
         } else {
             let cursor = ime_state.cursor as u32;
             let ov = ibus_text_value(&ime_state.preedit);
             if let Ok(v) = zvariant::Value::try_from(&ov) {
                 let _ = Self::update_preedit_text(&ctxt, v, cursor, true).await;
             }
+            if let Some(kctxt) = &self.kimpanel_ctxt {
+                let _ = Kimpanel::update_preedit_text(kctxt, &ime_state.preedit, "").await;
+                let _ = Kimpanel::show_preedit_text(kctxt, true).await;
+            }
         }
 
         if ime_state.candidates.is_empty() {
             let _ = Self::hide_lookup_table(&ctxt).await;
+            if let Some(kctxt) = &self.kimpanel_ctxt {
+                let _ = Kimpanel::show_lookup_table(kctxt, false).await;
+            }
         } else {
             let ov = ibus_lookup_table_value(&ime_state);
             if let Ok(v) = zvariant::Value::try_from(&ov) {
                 let _ = Self::update_lookup_table(&ctxt, v, true).await;
+            }
+            if let Some(kctxt) = &self.kimpanel_ctxt {
+                let mut labels = Vec::new();
+                let mut cands = Vec::new();
+                let select_keys = ime_state.select_keys.as_deref();
+                for (i, c) in ime_state.candidates.iter().enumerate() {
+                    labels.push(candidate_label(i, select_keys));
+                    cands.push(candidate_display_text(c));
+                }
+                let labels_ref: Vec<&str> = labels.iter().map(|s| s.as_str()).collect();
+                let cands_ref: Vec<&str> = cands.iter().map(|s| s.as_str()).collect();
+                let attrs: Vec<&str> = vec![];
+                let _ = Kimpanel::update_lookup_table(
+                    kctxt,
+                    &labels_ref,
+                    &cands_ref,
+                    &attrs,
+                    false, // has_prev
+                    false, // has_next
+                ).await;
+                let _ = Kimpanel::show_lookup_table(kctxt, true).await;
+                let _ = Kimpanel::update_spot_location(kctxt, self.cursor_x.load(Ordering::Relaxed), self.cursor_y.load(Ordering::Relaxed)).await;
             }
         }
 
@@ -379,27 +423,63 @@ impl InputContext {
     async fn hide_lookup_table(ctxt: &SignalContext<'_>) -> zbus::Result<()>;
 }
 
-async fn clear_input_context_ui(ctxt: &SignalContext<'_>) {
+async fn clear_input_context_ui(ctxt: &SignalContext<'_>, kctxt: &Option<SignalContext<'static>>) {
     let _ = InputContext::hide_preedit_text(ctxt).await;
     let _ = InputContext::hide_lookup_table(ctxt).await;
+    if let Some(kc) = kctxt {
+        let _ = Kimpanel::show_preedit_text(kc, false).await;
+        let _ = Kimpanel::show_lookup_table(kc, false).await;
+    }
 }
 
 /// Send an empty UpdatePreeditText to tell the client the composition ended
 /// before committing. This is the sequence Chromium/CEF requires so that it
 /// can correctly place the committed text without conflating it with the
 /// still-active preedit region.
-async fn clear_preedit(ctxt: &SignalContext<'_>) {
+async fn clear_preedit(ctxt: &SignalContext<'_>, kctxt: &Option<SignalContext<'static>>) {
     let ov = ibus_text_value("");
     if let Ok(v) = zvariant::Value::try_from(&ov) {
         let _ = InputContext::update_preedit_text(ctxt, v, 0, false).await;
+    }
+    if let Some(kc) = kctxt {
+        let _ = Kimpanel::update_preedit_text(kc, "", "").await;
+        let _ = Kimpanel::show_preedit_text(kc, false).await;
     }
 }
 
 // ── IBusBus D-Bus object ──────────────────────────────────────────────────────
 
+struct Kimpanel;
+
+#[interface(name = "org.kde.kimpanel.inputmethod")]
+impl Kimpanel {
+    #[zbus(signal)]
+    async fn update_spot_location(ctxt: &SignalContext<'_>, x: i32, y: i32) -> zbus::Result<()>;
+
+    #[zbus(signal)]
+    async fn update_lookup_table(
+        ctxt: &SignalContext<'_>,
+        labels: &[&str],
+        candidates: &[&str],
+        attrs: &[&str],
+        has_prev: bool,
+        has_next: bool,
+    ) -> zbus::Result<()>;
+
+    #[zbus(signal)]
+    async fn show_lookup_table(ctxt: &SignalContext<'_>, b: bool) -> zbus::Result<()>;
+
+    #[zbus(signal)]
+    async fn update_preedit_text(ctxt: &SignalContext<'_>, text: &str, attr: &str) -> zbus::Result<()>;
+
+    #[zbus(signal)]
+    async fn show_preedit_text(ctxt: &SignalContext<'_>, b: bool) -> zbus::Result<()>;
+}
+
 struct IBusBus {
     engine: CoreEngine,
     ctx_counter: Arc<AtomicU32>,
+    kimpanel_ctxt: Option<SignalContext<'static>>,
 }
 
 #[interface(name = "org.freedesktop.IBus")]
@@ -421,7 +501,12 @@ impl IBusBus {
             .engine
             .create_session()
             .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?;
-        let ctx = InputContext { session };
+        let ctx = InputContext {
+            session,
+            kimpanel_ctxt: self.kimpanel_ctxt.clone(),
+            cursor_x: Arc::new(AtomicI32::new(0)),
+            cursor_y: Arc::new(AtomicI32::new(0)),
+        };
         server
             .at(path.clone(), ctx)
             .await
@@ -545,11 +630,25 @@ pub async fn run(engine: CoreEngine) {
             return;
         }
     };
+    
+    let engine_clone = engine.clone();
+    let kimpanel_ctxt = match builder.serve_at("/org/kde/kimpanel/inputmethod", Kimpanel) {
+        Ok(b) => {
+            // Re-bind builder
+            b
+        }
+        Err(e) => {
+            tracing::warn!("Failed to serve Kimpanel: {e}");
+            builder // return original builder
+        }
+    };
+
     let builder = match builder.serve_at(
         "/org/freedesktop/IBus",
         IBusBus {
             engine,
             ctx_counter: Arc::new(AtomicU32::new(1)),
+            kimpanel_ctxt: None, // Will fill after build
         },
     ) {
         Ok(b) => b,
@@ -571,6 +670,21 @@ pub async fn run(engine: CoreEngine) {
         .unwrap_or_else(|_| "unix:path=/run/user/1000/bus".to_owned());
 
     write_ibus_address_files(&dbus_address);
+
+    let kimpanel_ctxt = SignalContext::new(&conn, "/org/kde/kimpanel/inputmethod").ok();
+    
+    // We need to update the IBusBus instance with the kimpanel_ctxt.
+    // However, IBusBus is owned by the ObjectServer. Instead of mutating it, we just set
+    // it properly before serving if possible, or use a shared state.
+    // Actually, we can just create the SignalContext from `conn` and share it!
+    
+    // Let's re-register IBusBus with the valid kimpanel_ctxt.
+    let _ = conn.object_server().remove::<IBusBus, _>("/org/freedesktop/IBus").await;
+    let _ = conn.object_server().at("/org/freedesktop/IBus", IBusBus {
+        engine: engine_clone,
+        ctx_counter: Arc::new(AtomicU32::new(1)),
+        kimpanel_ctxt,
+    }).await;
 
     // Notify any already-connected IBus clients that the keytao engine is active.
     // Chromium/CEF clients that connected before this signal can use GetGlobalEngine instead.

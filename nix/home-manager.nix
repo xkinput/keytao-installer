@@ -107,7 +107,7 @@ in
               --file "$HOME/.config/kwinrc" \
               --group Wayland \
               --key InputMethod \
-              "${kdeVirtualKeyboardDesktop}"
+              "${cfg.package}/share/applications/${kdeVirtualKeyboardDesktop}"
           fi
           '';
         };
@@ -118,7 +118,7 @@ in
               --file "$HOME/.config/kwinrc" \
               --group Wayland \
               --key InputMethod \
-              "${kdeVirtualKeyboardDesktop}"
+              "${cfg.package}/share/applications/${kdeVirtualKeyboardDesktop}"
           fi
         '';
       })

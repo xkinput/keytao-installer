@@ -246,8 +246,9 @@ fn main() {
 
         if kwin_socket {
             tracing::info!(
-                "KWin Virtual Keyboard mode: using WAYLAND_SOCKET for zwp_input_method_v2"
+                "KWin Virtual Keyboard mode detected! Unsetting WAYLAND_SOCKET so wayland-client connects to WAYLAND_DISPLAY where KWin exposes zwp_input_method_manager_v2"
             );
+            std::env::remove_var("WAYLAND_SOCKET");
         }
 
         let selected = if kwin_socket {

@@ -102,6 +102,8 @@ struct App {
     started_at: Instant,
     serial: u32,
     active: bool,
+    pending_active: Option<bool>,
+    deactivate_deadline: Option<Instant>,
 
     xkb_context: xkb::Context,
     xkb_keymap: Option<xkb::Keymap>,
@@ -142,6 +144,8 @@ impl App {
             started_at: Instant::now(),
             serial: 0,
             active: false,
+            pending_active: None,
+            deactivate_deadline: None,
             xkb_context: xkb::Context::new(xkb::CONTEXT_NO_FLAGS),
             xkb_keymap: None,
             xkb_state: None,
@@ -542,23 +546,30 @@ impl Dispatch<ZwpInputMethodV2, ()> for App {
     ) {
         match event {
             zwp_input_method_v2::Event::Activate => {
-                state.active = true;
-                // Always replace any existing grab so we don't accumulate stale proxies.
-                state.keyboard_grab = None;
-                let grab = proxy.grab_keyboard(qh, ());
-                tracing::debug!("IME activated; keyboard grab requested");
-                state.keyboard_grab = Some(grab);
+                state.pending_active = Some(true);
+                if state.keyboard_grab.is_none() {
+                    state.keyboard_grab = Some(proxy.grab_keyboard(qh, ()));
+                }
+                tracing::debug!("IME activate pending until done");
             }
             zwp_input_method_v2::Event::Deactivate => {
-                state.active = false;
-                let had_grab = state.keyboard_grab.take().is_some();
-                state.session.reset();
-                state.mode_hint_until = None;
-                state.hide_panel_popup();
-                tracing::debug!("IME deactivated (had_grab={had_grab})");
+                state.pending_active = Some(false);
+                tracing::debug!("IME deactivate pending until done");
             }
             zwp_input_method_v2::Event::Done => {
                 state.serial = state.serial.wrapping_add(1);
+                if let Some(next_active) = state.pending_active.take() {
+                    if next_active {
+                        state.deactivate_deadline = None;
+                        state.active = true;
+                        tracing::debug!("IME activated");
+                    } else {
+                        state.deactivate_deadline = Some(
+                            Instant::now() + Duration::from_millis(180),
+                        );
+                        tracing::debug!("IME deactivation deferred for debounce");
+                    }
+                }
             }
             zwp_input_method_v2::Event::Unavailable => {
                 // KDE Plasma: this fires when another IME (Fcitx5, IBus, Maliit) already
@@ -759,10 +770,23 @@ pub fn run(engine: CoreEngine) -> Result<(), String> {
             app.show_panel(ImeState::empty(), &qh);
         }
 
+        if app
+            .deactivate_deadline
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            app.deactivate_deadline = None;
+            app.active = false;
+            let had_grab = app.keyboard_grab.take().is_some();
+            app.session.reset();
+            app.mode_hint_until = None;
+            app.hide_panel_popup();
+            tracing::debug!("IME deactivated after debounce (had_grab={had_grab})");
+        }
+
         if let Err(e) = queue.flush() {
             tracing::warn!("Wayland flush error: {e}");
         }
-        let timeout_ms = if app.mode_hint_until.is_some() {
+        let timeout_ms = if app.mode_hint_until.is_some() || app.deactivate_deadline.is_some() {
             100
         } else {
             -1

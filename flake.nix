@@ -350,6 +350,7 @@
                         export GTK_PATH="${pkgs.gtk3}/lib/gtk-3.0/3.0.0:${pkgs.ibus}/lib/gtk-3.0/3.0.0"
                         _immodules_cache="$HOME/.cache/keytao-immodules.cache"
                         ${pkgs.gtk3}/bin/gtk-query-immodules-3.0 > "$_immodules_cache" 2>/dev/null
+                        ${pkgs.gtk3}/bin/gtk-query-immodules-3.0 ${pkgs.ibus}/lib/gtk-3.0/3.0.0/immodules/im-ibus.so >> "$_immodules_cache" 2>/dev/null
                         export GTK_IM_MODULE_FILE="$_immodules_cache"
 
                         # Add Android platform-tools (adb) and cmdline-tools to PATH

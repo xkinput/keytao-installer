@@ -212,12 +212,10 @@ impl App {
         self.panel_popup = Some(popup);
     }
 
-    fn destroy_panel_popup(&mut self) {
-        if let Some(popup) = self.panel_popup.take() {
-            popup.destroy();
-        }
-        if let Some(surface) = self.panel_surface.take() {
-            surface.destroy();
+    fn hide_panel_popup(&mut self) {
+        if let Some(surface) = &self.panel_surface {
+            surface.attach(None, 0, 0);
+            surface.commit();
         }
         if let Some(buf) = self.panel_buffer.take() {
             buf.destroy();
@@ -289,7 +287,7 @@ impl App {
             self.panel_visible = true;
             self.redraw_panel(qh);
         } else {
-            self.destroy_panel_popup();
+            self.hide_panel_popup();
         }
     }
 
@@ -556,7 +554,7 @@ impl Dispatch<ZwpInputMethodV2, ()> for App {
                 let had_grab = state.keyboard_grab.take().is_some();
                 state.session.reset();
                 state.mode_hint_until = None;
-                state.destroy_panel_popup();
+                state.hide_panel_popup();
                 tracing::debug!("IME deactivated (had_grab={had_grab})");
             }
             zwp_input_method_v2::Event::Done => {
@@ -656,12 +654,12 @@ impl Dispatch<ZwpInputMethodKeyboardGrabV2, ()> for App {
 
 impl Dispatch<ZwpInputPopupSurfaceV2, ()> for App {
     fn event(
-        _state: &mut Self,
+        state: &mut Self,
         _proxy: &ZwpInputPopupSurfaceV2,
         event: zwp_input_popup_surface_v2::Event,
         _: &(),
         _conn: &Connection,
-        _qh: &QueueHandle<Self>,
+        qh: &QueueHandle<Self>,
     ) {
         if let zwp_input_popup_surface_v2::Event::TextInputRectangle {
             x,
@@ -671,6 +669,14 @@ impl Dispatch<ZwpInputPopupSurfaceV2, ()> for App {
         } = event
         {
             tracing::trace!("cursor hint: {x},{y} {width}x{height}");
+            // KWin (and other Wayland compositors) often require a re-commit of the surface
+            // after sending TextInputRectangle, otherwise the popup might not be mapped or updated.
+            let has_content = state.ime_state.as_ref().map_or(false, |s| !s.candidates.is_empty());
+            let show_mode_hint = state.mode_hint_active();
+            if state.panel_surface.is_some() && (has_content || show_mode_hint) {
+                tracing::debug!("rerender_panel_after_rectangle");
+                state.redraw_panel(qh);
+            }
         }
     }
 }

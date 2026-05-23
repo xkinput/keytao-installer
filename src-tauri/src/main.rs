@@ -10,6 +10,7 @@ fn main() {
             std::env::set_var("GDK_BACKEND", "x11");
             std::env::set_var("GTK_IM_MODULE", "xim");
             std::env::set_var("QT_IM_MODULE", "xim");
+            std::env::set_var("XMODIFIERS", "@im=keytao");
         }
     }
     keytao_app_lib::run()

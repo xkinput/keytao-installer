@@ -177,8 +177,21 @@
         keytaoAppLauncher = pkgs.writeShellScriptBin "keytao-app" ''
           export DISPLAY="''${DISPLAY:-:0}"
           export XMODIFIERS="''${XMODIFIERS:-@im=keytao}"
-          export GTK_IM_MODULE="''${GTK_IM_MODULE:-wayland}"
-          export QT_IM_MODULE="''${QT_IM_MODULE:-wayland}"
+          
+          # On KDE Plasma Wayland, WebKitGTK's wayland IM module is often buggy or
+          # incompatible with KWin's text-input-v3 implementation. Furthermore,
+          # keytao-ime provides an IBus server on KDE as a fallback.
+          case "''${XDG_CURRENT_DESKTOP,,}" in
+            *kde*)
+              export GTK_IM_MODULE="''${GTK_IM_MODULE:-ibus}"
+              export QT_IM_MODULE="''${QT_IM_MODULE:-ibus}"
+              ;;
+            *)
+              export GTK_IM_MODULE="''${GTK_IM_MODULE:-wayland}"
+              export QT_IM_MODULE="''${QT_IM_MODULE:-wayland}"
+              ;;
+          esac
+
           export GDK_BACKEND="''${GDK_BACKEND:-wayland}"
           export WEBKIT_DISABLE_DMABUF_RENDERER="''${WEBKIT_DISABLE_DMABUF_RENDERER:-1}"
 

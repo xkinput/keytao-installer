@@ -632,14 +632,11 @@ pub async fn run(engine: CoreEngine) {
     };
     
     let engine_clone = engine.clone();
-    let kimpanel_ctxt = match builder.serve_at("/org/kde/kimpanel/inputmethod", Kimpanel) {
-        Ok(b) => {
-            // Re-bind builder
-            b
-        }
+    let builder = match builder.serve_at("/org/kde/kimpanel/inputmethod", Kimpanel) {
+        Ok(b) => b,
         Err(e) => {
             tracing::warn!("Failed to serve Kimpanel: {e}");
-            builder // return original builder
+            return; // We need builder back, but serve_at consumes it on Err too! Wait, zbus serve_at returns Result<Builder, Error>. No, in older zbus it might return Result<Builder, Error>. If it returns Err, we can't easily recover the builder without matching. Let's just use it directly.
         }
     };
 

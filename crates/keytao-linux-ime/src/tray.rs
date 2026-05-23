@@ -5,8 +5,7 @@ pub struct KeytaoTray;
 
 impl Tray for KeytaoTray {
     fn icon_name(&self) -> String {
-        // Use a standard system icon for input methods.
-        "input-keyboard".into()
+        "keytao-app".into()
     }
 
     fn title(&self) -> String {

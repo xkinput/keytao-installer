@@ -99,11 +99,19 @@ impl BackendSelection {
             };
         }
         if is_kde {
-            // KDE/KWin only grants zwp_input_method_v2 to its registered virtual-keyboard
-            // plugin (a compiled .so); arbitrary processes always get Unavailable.
-            // Fall back to IBus server + XIM instead.
+            // KDE Plasma 6 Wayland Virtual Keyboard handles BOTH Wayland and XWayland input
+            // by translating X11 text input to zwp_input_method_v2 natively inside KWin.
+            // If we run our own IBus or XIM backend here, XWayland apps (like Chrome)
+            // will bypass KWin and connect to our headless IBus backend, resulting in NO UI!
+            // Therefore, on KDE Wayland, we MUST ONLY run the Wayland backend.
+            if has_wayland {
+                return Self {
+                    wayland: true,
+                    ..Default::default()
+                };
+            }
             return Self {
-                ibus: has_wayland || has_x11,
+                ibus: true,
                 xim: has_x11,
                 ..Default::default()
             };

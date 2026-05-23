@@ -209,26 +209,34 @@ impl App {
     fn create_panel_popup(&mut self, qh: &QueueHandle<Self>) {
         let (Some(compositor), Some(im), Some(shm)) =
             (&self.compositor, &self.input_method, &self.shm)
-        {
-            let surface = compositor.create_surface(qh, ());
-            let popup = im.get_input_popup_surface(&surface, qh, ());
-            
-            // KDE KWin requires a 1x1 transparent buffer to make the surface valid immediately
-            // upon creation, otherwise it may ignore the popup and not send TextInputRectangle.
-            let mut tmp = tempfile().expect("tempfile");
-            tmp.write_all(&[0u8; 4]).expect("write shm");
-            let pool = shm.create_pool(tmp.as_fd(), 4, qh, ());
-            let buf = pool.create_buffer(0, 1, 1, 4, wl_shm::Format::Argb8888, qh, ());
-            pool.destroy();
-            
-            surface.attach(Some(&buf), 0, 0);
-            surface.damage_buffer(0, 0, 1, 1);
-            surface.commit();
-            
-            self.panel_buffer = Some(buf);
-            self.panel_surface = Some(surface);
-            self.panel_popup = Some(popup);
-        }
+        else {
+            return;
+        };
+        let surface = compositor.create_surface(qh, ());
+        let popup = im.get_input_popup_surface(&surface, qh, ());
+        
+        // 1x1 transparent dummy buffer to make surface valid for KWin
+        // KWin drops surfaces without buffers, so it won't send TextInputRectangle.
+        let mut file = tempfile().expect("tempfile");
+        file.write_all(&[0u8; 4]).expect("write dummy buffer");
+        let fd = std::os::fd::AsFd::as_fd(&file);
+        let pool = shm.create_pool(fd, 4, qh, ());
+        let buf = pool.create_buffer(
+            0,
+            1,
+            1,
+            4,
+            wl_shm::Format::Argb8888,
+            qh,
+            (),
+        );
+        surface.attach(Some(&buf), 0, 0);
+        surface.damage_buffer(0, 0, 1, 1);
+        surface.commit();
+        
+        self.panel_buffer = Some(buf);
+        self.panel_surface = Some(surface);
+        self.panel_popup = Some(popup);
     }
 
     fn hide_panel_popup(&mut self) {
@@ -431,6 +439,10 @@ impl App {
                 let len = preedit.len() as i32;
                 im.set_preedit_string(preedit, len, len);
                 im.commit(self.serial);
+                
+                if (effective_mods & MOD_CONTROL) != 0 && (sym_raw >= 0x0020 && sym_raw <= 0x007e) {
+                    self.forward_unhandled_key(evdev_keycode, sym_raw);
+                }
             } else {
                 // librime processed the key but produced nothing — forward it.
                 self.forward_unhandled_key(evdev_keycode, sym_raw);

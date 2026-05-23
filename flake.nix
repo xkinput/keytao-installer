@@ -263,6 +263,7 @@
             harfbuzz
             harfbuzz.dev
             freetype
+            freetype.dev
             bzip2
             bzip2.dev
             xz
@@ -278,6 +279,8 @@
           NDK_HOME = "${androidSdk}/libexec/android-sdk/ndk/${ndkVersion}";
           RIME_INCLUDE_DIR = "${pkgs.librime}/include";
           RIME_LIB_DIR = "${pkgs.librime}/lib";
+          LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
+          BINDGEN_EXTRA_CLANG_ARGS = "-I${pkgs.librime}/include";
           BZIP2_LIB_DIR = "${pkgs.bzip2}/lib";
           BZIP2_INCLUDE_DIR = "${pkgs.bzip2.dev}/include";
           LZMA_API_STATIC = "0";

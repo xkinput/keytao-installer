@@ -626,7 +626,14 @@ pub async fn run(engine: CoreEngine) {
     let builder = match builder.name("org.freedesktop.IBus") {
         Ok(b) => b,
         Err(e) => {
-            tracing::error!("IBus: failed to request name: {e}");
+            tracing::error!("IBus: failed to request IBus name: {e}");
+            return;
+        }
+    };
+    let builder = match builder.name("org.kde.kimpanel.inputmethod") {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!("Kimpanel: failed to request Kimpanel name: {e}");
             return;
         }
     };
@@ -636,7 +643,7 @@ pub async fn run(engine: CoreEngine) {
         Ok(b) => b,
         Err(e) => {
             tracing::warn!("Failed to serve Kimpanel: {e}");
-            return; // We need builder back, but serve_at consumes it on Err too! Wait, zbus serve_at returns Result<Builder, Error>. No, in older zbus it might return Result<Builder, Error>. If it returns Err, we can't easily recover the builder without matching. Let's just use it directly.
+            return;
         }
     };
 

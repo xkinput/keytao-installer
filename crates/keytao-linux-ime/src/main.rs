@@ -99,19 +99,13 @@ impl BackendSelection {
             };
         }
         if is_kde {
-            // KDE Plasma 6 Wayland Virtual Keyboard handles BOTH Wayland and XWayland input
-            // by translating X11 text input to zwp_input_method_v2 natively inside KWin.
-            // If we run our own IBus or XIM backend here, XWayland apps (like Chrome)
-            // will bypass KWin and connect to our headless IBus backend, resulting in NO UI!
-            // Therefore, on KDE Wayland, we MUST ONLY run the Wayland backend.
-            if has_wayland {
-                return Self {
-                    wayland: true,
-                    ..Default::default()
-                };
-            }
+            // KDE Plasma 6 Wayland uses Virtual Keyboard (zwp_input_method_v2) for native apps.
+            // However, XWayland apps (like Chromium) may have issues or bypass KWin's interception,
+            // so we MUST concurrently run the IBus backend to handle them.
+            // The IBus backend draws its candidate window via the native KDE Kimpanel D-Bus interface.
             return Self {
-                ibus: true,
+                wayland: has_wayland,
+                ibus: has_wayland || has_x11,
                 xim: has_x11,
                 ..Default::default()
             };

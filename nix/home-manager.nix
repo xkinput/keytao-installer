@@ -73,9 +73,6 @@ in
       }
 
       (lib.mkIf cfg.setInputMethodEnvironment {
-        # On KDE Plasma 6 Wayland, KWin only supports zwp_input_method_v1.
-        # Since keytao-ime implements zwp_input_method_v2, it cannot function as a native
-        # KWin Virtual Keyboard. Therefore, we MUST use the IBus backend and Kimpanel.
         home.sessionVariables = {
           XMODIFIERS = "@im=keytao";
           GTK_IM_MODULE = lib.mkDefault "ibus";
@@ -94,17 +91,12 @@ in
       })
 
       (lib.mkIf (cfg.kde && cfg.kdeAutoConfigureVirtualKeyboard) {
-        # Unset the InputMethod in kwinrc since we cannot use the Wayland Virtual Keyboard
-        # protocol natively. If the user previously had it set, we remove it to prevent
-        # KWin from auto-spawning a conflicting instance of keytao-ime.
         home.activation.configureKeytaoKdeVirtualKeyboard = lib.hm.dag.entryAfter [ "writeBoundary" ] ''
           if [ -x "${pkgs.kdePackages.kconfig}/bin/kreadconfig6" ]; then
             CURRENT_IM=$("${pkgs.kdePackages.kconfig}/bin/kreadconfig6" --file "$HOME/.config/kwinrc" --group Wayland --key InputMethod || true)
-            case "$CURRENT_IM" in
-              *keytao*)
-                "${pkgs.kdePackages.kconfig}/bin/kwriteconfig6" --file "$HOME/.config/kwinrc" --group Wayland --key InputMethod ""
-                ;;
-            esac
+            if [ "$CURRENT_IM" != "${kdeVirtualKeyboardDesktop}" ]; then
+              "${pkgs.kdePackages.kconfig}/bin/kwriteconfig6" --file "$HOME/.config/kwinrc" --group Wayland --key InputMethod "${kdeVirtualKeyboardDesktop}"
+            fi
           fi
         '';
       })
@@ -120,8 +112,8 @@ in
           "${cfg.package}/share/applications/keytao-app.desktop";
       })
 
-      # Because KWin Virtual Keyboard is NOT used, we MUST start the daemon
-      # automatically so the IBus backend is available for QT_IM_MODULE=ibus.
+      # Keep a compatibility daemon for IBus/XIM clients; KWin starts the native
+      # Wayland input-method instance separately from keytao-wayland-launcher.desktop.
       (lib.mkIf (cfg.autostartDaemon || cfg.kde) {
         xdg.configFile."autostart/keytao-ime.desktop".text = ''
           [Desktop Entry]

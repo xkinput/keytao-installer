@@ -21,8 +21,9 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
 
-# Wayland: input-method-v2 (from wayland-protocols-misc) + layer-shell
+# Wayland: input-method-v2 for wlroots-like compositors, input-method-v1 for KDE/KWin
 wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client", "unstable"] }
 wayland-protocols-misc = { version = "0.3", features = ["client"] }
 
 # XKB state machine for both Wayland (evdev→keysym) and X11 (keycode→keysym)

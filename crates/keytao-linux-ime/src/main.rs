@@ -13,6 +13,7 @@ mod tray;
 #[cfg(target_os = "linux")]
 mod wayland_backend;
 #[cfg(target_os = "linux")]
+mod wayland_backend_kde;
 #[cfg(target_os = "linux")]
 mod x11_backend;
 
@@ -99,12 +100,10 @@ impl BackendSelection {
             };
         }
         if is_kde {
-            // KDE Plasma 6 Wayland uses Virtual Keyboard (zwp_input_method_v2) for native apps.
-            // However, XWayland apps (like Chromium) may have issues or bypass KWin's interception,
-            // so we MUST concurrently run the IBus backend to handle them.
-            // The IBus backend draws its candidate window via the native KDE Kimpanel D-Bus interface.
+            // A normal KDE autostart daemon is not the KWin Virtual Keyboard owner,
+            // so it must not try the native Wayland input-method path. KWin launches
+            // the virtual-keyboard instance separately with WAYLAND_SOCKET.
             return Self {
-                wayland: has_wayland,
                 ibus: has_wayland || has_x11,
                 xim: has_x11,
                 ..Default::default()
@@ -215,10 +214,9 @@ fn main() {
         }
         tracing::info!("librime ready");
 
-        // When KWin launches us as a Virtual Keyboard (via the WAYLAND_SOCKET desktop entry),
-        // it passes a private Wayland socket fd via WAYLAND_SOCKET.  In that case we must use
-        // the Wayland backend directly — Connection::connect_to_env() picks up WAYLAND_SOCKET
-        // automatically.  Skip the KDE IBus fallback in this mode.
+        // KWin launches the configured Virtual Keyboard with a private
+        // WAYLAND_SOCKET. On KDE this socket advertises input-method-v1, not the
+        // input-method-v2 manager used by wlroots-style compositors.
         let kwin_socket = std::env::var("WAYLAND_SOCKET")
             .ok()
             .and_then(|s| s.parse::<i32>().ok())
@@ -233,8 +231,8 @@ fn main() {
         let is_gnome = desktop
             .split(':')
             .any(|s| matches!(s, "gnome" | "unity" | "budgie" | "pantheon" | "x-cinnamon"));
-        // When launched via WAYLAND_SOCKET (KWin Virtual Keyboard), treat as plain Wayland
-        // so the wayland backend is selected even on KDE.
+        // When launched via WAYLAND_SOCKET (KWin Virtual Keyboard), do not treat
+        // the process as a normal KDE autostart daemon.
         let is_kde = !kwin_socket && desktop.split(':').any(|s| s == "kde");
 
         // A standalone KDE daemon plus plasma-workspace IBus env overrides
@@ -244,18 +242,10 @@ fn main() {
             remove_legacy_kde_env_file();
         }
 
-        if kwin_socket {
-            tracing::info!(
-                "KWin Virtual Keyboard mode detected! Unsetting WAYLAND_SOCKET so wayland-client connects to WAYLAND_DISPLAY where KWin exposes zwp_input_method_manager_v2"
-            );
-            std::env::remove_var("WAYLAND_SOCKET");
-        }
-
         let selected = if kwin_socket {
             // Launched by KWin as its registered Virtual Keyboard. The private
-            // WAYLAND_SOCKET is used for Wayland IM. We ALSO start IBus and XIM
-            // so that GTK/Tauri apps (which struggle with Wayland text-input)
-            // and XWayland apps can connect directly.
+            // WAYLAND_SOCKET is used for KDE input-method-v1. We also start IBus
+            // and XIM so fallback clients can connect directly.
             BackendSelection {
                 wayland: true,
                 ibus: true,
@@ -320,7 +310,12 @@ fn main() {
         }
 
         if selected.wayland {
-            match wayland_backend::run(engine) {
+            let result = if kwin_socket {
+                wayland_backend_kde::run(engine)
+            } else {
+                wayland_backend::run(engine)
+            };
+            match result {
                 Ok(()) => {}
                 Err(e) => {
                     tracing::warn!("Wayland backend stopped: {e}");

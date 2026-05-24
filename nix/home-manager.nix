@@ -100,9 +100,11 @@ in
         home.activation.configureKeytaoKdeVirtualKeyboard = lib.hm.dag.entryAfter [ "writeBoundary" ] ''
           if [ -x "${pkgs.kdePackages.kconfig}/bin/kreadconfig6" ]; then
             CURRENT_IM=$("${pkgs.kdePackages.kconfig}/bin/kreadconfig6" --file "$HOME/.config/kwinrc" --group Wayland --key InputMethod || true)
-            if [ "$CURRENT_IM" = "${cfg.package}/share/applications/${kdeVirtualKeyboardDesktop}" ] || [ "$CURRENT_IM" = "keytao-wayland-launcher.desktop" ]; then
-              "${pkgs.kdePackages.kconfig}/bin/kwriteconfig6" --file "$HOME/.config/kwinrc" --group Wayland --key InputMethod ""
-            fi
+            case "$CURRENT_IM" in
+              *keytao*)
+                "${pkgs.kdePackages.kconfig}/bin/kwriteconfig6" --file "$HOME/.config/kwinrc" --group Wayland --key InputMethod ""
+                ;;
+            esac
           fi
         '';
       })

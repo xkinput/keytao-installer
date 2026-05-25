@@ -296,7 +296,9 @@ fn main() {
             selected.describe(),
         );
 
-        tray::spawn_tray();
+        if !kwin_socket {
+            tray::spawn_tray();
+        }
 
         if selected.ibus_engine {
             // Run as an IBus engine connecting to the existing ibus-daemon.

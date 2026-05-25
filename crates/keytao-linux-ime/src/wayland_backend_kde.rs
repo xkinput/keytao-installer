@@ -4,8 +4,10 @@
 //! text-input-v1/v2/v3 to KWin; the IME process talks input-method-v1 to KWin.
 
 use std::{
+    fs::File,
     os::fd::{AsFd, AsRawFd},
     time::{Duration, Instant},
+    io::Write,
 };
 
 use keytao_core::ImeState;
@@ -13,21 +15,29 @@ use wayland_client::{
     delegate_noop,
     globals::{registry_queue_init, GlobalListContents},
     protocol::{
+        wl_buffer::WlBuffer,
+        wl_compositor::WlCompositor,
         wl_keyboard::{self, WlKeyboard},
         wl_registry,
         wl_seat::WlSeat,
+        wl_shm::{self, WlShm},
+        wl_shm_pool::WlShmPool,
+        wl_surface::WlSurface,
     },
     Connection, Dispatch, QueueHandle, WEnum,
 };
 use wayland_protocols::wp::input_method::zv1::client::{
     zwp_input_method_context_v1::{self, ZwpInputMethodContextV1},
     zwp_input_method_v1::{self, ZwpInputMethodV1},
+    zwp_input_panel_surface_v1::ZwpInputPanelSurfaceV1,
+    zwp_input_panel_v1::ZwpInputPanelV1,
 };
 use xkbcommon::xkb;
 
 use crate::{
     engine::{CoreEngine, ImeSession},
     kimpanel::KimpanelHandle,
+    panel::{load_font, PanelRenderer},
 };
 
 const MOD_SHIFT: u32 = 0x0001;
@@ -89,10 +99,21 @@ struct App {
     pending_kimpanel_state: Option<ImeState>,
     clear_kimpanel: bool,
     globals_seen: Vec<String>,
+
+    renderer: Option<PanelRenderer>,
+    compositor: Option<WlCompositor>,
+    shm: Option<WlShm>,
+    input_panel: Option<ZwpInputPanelV1>,
+    panel_surface: Option<WlSurface>,
+    panel_popup: Option<ZwpInputPanelSurfaceV1>,
+    panel_buffer: Option<WlBuffer>,
+    panel_visible: bool,
+    ime_state: Option<ImeState>,
 }
 
 impl App {
     fn new(session: ImeSession, kimpanel: Option<KimpanelHandle>) -> Self {
+        let renderer = load_font().and_then(PanelRenderer::new);
         Self {
             session,
             seat: None,
@@ -112,6 +133,16 @@ impl App {
             pending_kimpanel_state: None,
             clear_kimpanel: true,
             globals_seen: Vec::new(),
+
+            renderer,
+            compositor: None,
+            shm: None,
+            input_panel: None,
+            panel_surface: None,
+            panel_popup: None,
+            panel_buffer: None,
+            panel_visible: false,
+            ime_state: None,
         }
     }
 
@@ -132,6 +163,119 @@ impl App {
         self.session.reset();
         self.pending_kimpanel_state = None;
         self.clear_kimpanel = true;
+        self.hide_panel_popup();
+    }
+
+    fn create_panel_popup(&mut self, qh: &QueueHandle<Self>) {
+        let (Some(compositor), Some(panel_manager), Some(shm)) =
+            (&self.compositor, &self.input_panel, &self.shm)
+        else {
+            return;
+        };
+        let surface = compositor.create_surface(qh, ());
+        let popup = panel_manager.get_input_panel_surface(&surface, qh, ());
+        popup.set_overlay_panel();
+
+        // 1x1 transparent dummy buffer to make surface valid for KWin
+        let fd = match tempfile() {
+            Ok(file) => file,
+            Err(e) => {
+                tracing::warn!("failed to create dummy SHM file: {e}");
+                return;
+            }
+        };
+        let pool = shm.create_pool(fd.as_fd(), 4, qh, ());
+        let buf = pool.create_buffer(0, 1, 1, 4, wl_shm::Format::Argb8888, qh, ());
+        surface.attach(Some(&buf), 0, 0);
+        surface.damage_buffer(0, 0, 1, 1);
+        surface.commit();
+
+        self.panel_buffer = Some(buf);
+        self.panel_surface = Some(surface);
+        self.panel_popup = Some(popup);
+        pool.destroy();
+    }
+
+    fn hide_panel_popup(&mut self) {
+        if let Some(surface) = &self.panel_surface {
+            surface.attach(None, 0, 0);
+            surface.commit();
+        }
+        if let Some(buf) = self.panel_buffer.take() {
+            buf.destroy();
+        }
+        self.panel_visible = false;
+        self.ime_state = None;
+    }
+
+    fn redraw_panel(&mut self, qh: &QueueHandle<Self>) {
+        let (Some(renderer), Some(shm), Some(surface)) = (
+            self.renderer.as_ref(),
+            self.shm.as_ref(),
+            self.panel_surface.as_ref(),
+        ) else {
+            return;
+        };
+
+        let (pixels, w, h) = if let Some(state) = self
+            .ime_state
+            .as_ref()
+            .filter(|state| !state.candidates.is_empty())
+        {
+            renderer.render(state)
+        } else {
+            return;
+        };
+        if w == 0 || h == 0 {
+            return;
+        }
+        let stride = w * 4;
+        let pool_size = (stride * h) as usize;
+
+        let mut tmp = match tempfile() {
+            Ok(file) => file,
+            Err(e) => {
+                tracing::warn!("failed to create SHM tempfile: {e}");
+                return;
+            }
+        };
+        if tmp.write_all(&pixels).is_err() {
+            tracing::warn!("failed to write SHM buffer");
+            return;
+        }
+        let pool = shm.create_pool(tmp.as_fd(), pool_size as i32, qh, ());
+        let buffer = pool.create_buffer(
+            0,
+            w as i32,
+            h as i32,
+            stride as i32,
+            wl_shm::Format::Argb8888,
+            qh,
+            (),
+        );
+
+        surface.attach(Some(&buffer), 0, 0);
+        surface.damage_buffer(0, 0, w as i32, h as i32);
+        surface.commit();
+
+        if let Some(old) = self.panel_buffer.replace(buffer) {
+            old.destroy();
+        }
+        pool.destroy();
+    }
+
+    fn show_panel(&mut self, state: ImeState, qh: &QueueHandle<Self>) {
+        let has_content = !state.candidates.is_empty();
+        self.ime_state = Some(state);
+        if has_content {
+            if self.panel_surface.is_none() {
+                self.create_panel_popup(qh);
+            }
+            self.panel_visible = true;
+            self.redraw_panel(qh);
+        } else {
+            self.hide_panel_popup();
+        }
     }
 
     fn commit_state_to_context(&self, state: &ImeState) {
@@ -223,6 +367,7 @@ impl App {
             }
             self.clear_context_preedit();
             self.clear_kimpanel();
+            self.hide_panel_popup();
             self.session.reset();
             return;
         }
@@ -234,6 +379,7 @@ impl App {
             if let Some(ime_state) = self.session.select_candidate(index) {
                 self.commit_state_to_context(&ime_state);
                 self.update_kimpanel(&ime_state);
+                self.show_panel(ime_state, qh);
                 return;
             }
         }
@@ -255,12 +401,14 @@ impl App {
         if result.accepted {
             self.commit_state_to_context(&ime_state);
             self.update_kimpanel(&ime_state);
+            self.show_panel(ime_state, qh);
             if should_forward_consumed_shortcut(sym_raw, effective_mods) {
                 self.forward_key(evdev_keycode, wl_keyboard::KeyState::Pressed as u32);
             }
         } else {
             self.clear_context_preedit();
             self.clear_kimpanel();
+            self.hide_panel_popup();
             self.forward_key(evdev_keycode, wl_keyboard::KeyState::Pressed as u32);
         }
 
@@ -302,8 +450,15 @@ impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for App {
             state.globals_seen.push(format!("{interface}@{version}#{name}"));
             match interface.as_str() {
                 "wl_seat" => state.seat = Some(registry.bind(name, version.min(7), qh, ())),
+                "wl_compositor" => {
+                    state.compositor = Some(registry.bind(name, version.min(6), qh, ()));
+                }
+                "wl_shm" => state.shm = Some(registry.bind(name, version.min(2), qh, ())),
                 "zwp_input_method_v1" => {
                     state.input_method = Some(registry.bind(name, 1, qh, ()));
+                }
+                "zwp_input_panel_v1" => {
+                    state.input_panel = Some(registry.bind(name, 1, qh, ()));
                 }
                 _ => {}
             }
@@ -443,6 +598,13 @@ impl Dispatch<WlKeyboard, ()> for App {
 }
 
 delegate_noop!(App: ignore WlSeat);
+delegate_noop!(App: ignore WlCompositor);
+delegate_noop!(App: ignore WlShm);
+delegate_noop!(App: ignore WlShmPool);
+delegate_noop!(App: ignore WlBuffer);
+delegate_noop!(App: ignore WlSurface);
+delegate_noop!(App: ignore ZwpInputPanelV1);
+delegate_noop!(App: ignore ZwpInputPanelSurfaceV1);
 
 pub fn run(engine: CoreEngine) -> Result<(), String> {
     let session = engine
@@ -453,20 +615,32 @@ pub fn run(engine: CoreEngine) -> Result<(), String> {
         registry_queue_init::<App>(&conn).map_err(|e| format!("KDE Wayland registry: {e}"))?;
     let qh = queue.handle();
 
+    let compositor: WlCompositor = globals
+        .bind(&qh, 1..=6, ())
+        .map_err(|e| format!("wl_compositor not advertised: {e}"))?;
+    let shm: WlShm = globals
+        .bind(&qh, 1..=2, ())
+        .map_err(|e| format!("wl_shm not advertised: {e}"))?;
     let seat: WlSeat = globals
         .bind(&qh, 1..=7, ())
         .map_err(|e| format!("wl_seat not advertised: {e}"))?;
     let input_method: ZwpInputMethodV1 = globals
         .bind(&qh, 1..=1, ())
         .map_err(|e| format!("zwp_input_method_v1 not advertised: {e}"))?;
+    let input_panel: ZwpInputPanelV1 = globals
+        .bind(&qh, 1..=1, ())
+        .map_err(|e| format!("zwp_input_panel_v1 not advertised: {e}"))?;
 
     let kimpanel_runtime =
         tokio::runtime::Runtime::new().map_err(|e| format!("Kimpanel runtime: {e}"))?;
     let kimpanel = kimpanel_runtime.block_on(KimpanelHandle::new());
 
     let mut app = App::new(session, kimpanel);
+    app.compositor = Some(compositor);
+    app.shm = Some(shm);
     app.seat = Some(seat);
     app.input_method = Some(input_method);
+    app.input_panel = Some(input_panel);
     queue.roundtrip(&mut app).expect("initial KDE roundtrip");
     for g in globals.contents().clone_list() {
         tracing::info!("KDE Wayland global: {} v{}", g.interface, g.version);
@@ -515,4 +689,14 @@ pub fn run(engine: CoreEngine) -> Result<(), String> {
             tracing::warn!("KDE Wayland poll failed");
         }
     }
+}
+
+fn tempfile() -> std::io::Result<File> {
+    use std::os::unix::io::FromRawFd;
+    let name = c"keytao-shm";
+    let fd = unsafe { libc::memfd_create(name.as_ptr(), libc::MFD_CLOEXEC) };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(unsafe { File::from_raw_fd(fd) })
 }

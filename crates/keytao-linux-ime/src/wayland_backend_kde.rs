@@ -468,7 +468,7 @@ pub fn run(engine: CoreEngine) -> Result<(), String> {
     app.seat = Some(seat);
     app.input_method = Some(input_method);
     queue.roundtrip(&mut app).expect("initial KDE roundtrip");
-    for g in globals.iter() {
+    for g in globals.contents().clone_list() {
         tracing::info!("KDE Wayland global: {} v{}", g.interface, g.version);
     }
 

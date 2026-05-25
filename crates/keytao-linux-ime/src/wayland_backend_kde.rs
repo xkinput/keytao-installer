@@ -572,14 +572,13 @@ impl Dispatch<WlKeyboard, ()> for App {
                     state.xkb_keymap = Some(km);
                 }
             }
-             wl_keyboard::Event::Key {
-                serial,
+            wl_keyboard::Event::Key {
+                serial: _,
                 time,
                 key,
                 state: ks,
             } => {
                 tracing::info!("KDE keyboard Event::Key: key={key}, state={ks:?}");
-                state.serial = serial;
                 state.last_key_time = time;
                 if let WEnum::Value(key_state) = ks {
                     state.handle_key_event(key, key_state, qh);

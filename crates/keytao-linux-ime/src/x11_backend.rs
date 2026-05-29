@@ -20,8 +20,8 @@ use x11rb::{
     xcb_ffi::XCBConnection,
 };
 use xim::{
-    x11rb::X11rbServer, CommitData, InputContext, InputStyle, Request, Server, ServerCore,
-    ServerError, ServerHandler, UserInputContext, XimConnections,
+    x11rb::X11rbServer, InputContext, InputStyle, Server, ServerError, ServerHandler,
+    UserInputContext, XimConnections,
 };
 
 use crate::{
@@ -55,17 +55,23 @@ fn should_bypass_empty_composition(sym: u32, mods: u32, state: &ImeState) -> boo
 
 fn commit_text(server: &mut MyServer, ic: &InputContext, text: &str) -> Result<(), ServerError> {
     tracing::info!("XIM commit text: {text:?}");
-    server.send_req(
-        ic.client_win(),
-        Request::Commit {
-            input_method_id: ic.input_method_id().get(),
-            input_context_id: ic.input_context_id().get(),
-            data: CommitData::Chars {
-                commited: text.as_bytes().to_vec(),
-                syncronous: false,
-            },
-        },
-    )
+    server.commit(ic, text)
+}
+
+fn client_supports_preedit(ic: &InputContext) -> bool {
+    let style = ic.input_style();
+    style.contains(InputStyle::PREEDIT_CALLBACKS) || style.contains(InputStyle::PREEDIT_POSITION)
+}
+
+fn draw_client_preedit(
+    server: &mut MyServer,
+    ic: &mut InputContext,
+    text: &str,
+) -> Result<(), ServerError> {
+    if client_supports_preedit(ic) {
+        server.preedit_draw(ic, text)?;
+    }
+    Ok(())
 }
 
 // ── IC per-context data ───────────────────────────────────────────────────────
@@ -245,13 +251,14 @@ impl KeyTaoHandler {
 
 impl ServerHandler<MyServer> for KeyTaoHandler {
     type InputContextData = IcData;
-    type InputStyleArray = [InputStyle; 4];
+    type InputStyleArray = [InputStyle; 2];
 
     fn new_ic_data(
         &mut self,
         _server: &mut MyServer,
-        _style: InputStyle,
+        style: InputStyle,
     ) -> Result<IcData, ServerError> {
+        tracing::info!("XIM NewICData style={style:?}");
         let session = self
             .engine
             .create_session()
@@ -261,8 +268,9 @@ impl ServerHandler<MyServer> for KeyTaoHandler {
 
     fn input_styles(&self) -> Self::InputStyleArray {
         [
-            InputStyle::PREEDIT_CALLBACKS | InputStyle::STATUS_NOTHING,
-            InputStyle::PREEDIT_POSITION | InputStyle::STATUS_NOTHING,
+            // Electron/Chromium X11 clients can get stuck when XIM drives an
+            // in-client preedit region. Keep composition in keytao's own panel
+            // and use XIM only for key filtering + final commit.
             InputStyle::PREEDIT_NOTHING | InputStyle::STATUS_NOTHING,
             InputStyle::PREEDIT_NONE | InputStyle::STATUS_NONE,
         ]
@@ -282,7 +290,11 @@ impl ServerHandler<MyServer> for KeyTaoHandler {
         server: &mut MyServer,
         user_ic: &mut UserInputContext<IcData>,
     ) -> Result<(), ServerError> {
-        tracing::info!("XIM CreateIC client_win={}", user_ic.ic.client_win());
+        tracing::info!(
+            "XIM CreateIC client_win={} style={:?}",
+            user_ic.ic.client_win(),
+            user_ic.ic.input_style()
+        );
         server.set_event_mask(&user_ic.ic, 1, 0)
     }
 
@@ -377,11 +389,12 @@ impl ServerHandler<MyServer> for KeyTaoHandler {
         let before_state = user_ic.user_data.session.state();
         if should_bypass_empty_composition(keysym, mods, &before_state) {
             self.hide_panel();
+            draw_client_preedit(server, &mut user_ic.ic, "")?;
             return Ok(false);
         }
         if is_enter_key(keysym) && !before_state.preedit.is_empty() {
+            draw_client_preedit(server, &mut user_ic.ic, "")?;
             commit_text(server, &user_ic.ic, &before_state.preedit)?;
-            server.preedit_draw(&mut user_ic.ic, "")?;
             user_ic.user_data.session.reset();
             self.hide_panel();
             return Ok(true);
@@ -392,9 +405,10 @@ impl ServerHandler<MyServer> for KeyTaoHandler {
                 .min(before_state.candidates.len().saturating_sub(1));
             if let Some(ime_state) = user_ic.user_data.session.select_candidate(index) {
                 if let Some(text) = &ime_state.committed {
+                    draw_client_preedit(server, &mut user_ic.ic, "")?;
                     commit_text(server, &user_ic.ic, text)?;
                 }
-                server.preedit_draw(&mut user_ic.ic, "")?;
+                draw_client_preedit(server, &mut user_ic.ic, "")?;
                 if ime_state.candidates.is_empty() {
                     self.hide_panel();
                 } else {
@@ -414,13 +428,14 @@ impl ServerHandler<MyServer> for KeyTaoHandler {
         let consumed = result.accepted;
 
         if let Some(text) = &ime_state.committed {
+            draw_client_preedit(server, &mut user_ic.ic, "")?;
             commit_text(server, &user_ic.ic, text)?;
         }
 
         if !ime_state.preedit.is_empty() {
-            server.preedit_draw(&mut user_ic.ic, &ime_state.preedit)?;
+            draw_client_preedit(server, &mut user_ic.ic, &ime_state.preedit)?;
         } else if ime_state.committed.is_some() {
-            server.preedit_draw(&mut user_ic.ic, "")?;
+            draw_client_preedit(server, &mut user_ic.ic, "")?;
         }
 
         if ime_state.candidates.is_empty() {
